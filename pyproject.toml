@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "slack-stealth-mcp"
+version = "0.1.0"
+description = "MCP server for stealth Slack interaction using session tokens"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "mcp>=1.0.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.0.0",
+    "playwright>=1.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+slack-stealth-mcp = "slack_stealth_mcp.server:main"
+slack-stealth-auth = "slack_stealth_mcp.auth:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/slack_stealth_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
