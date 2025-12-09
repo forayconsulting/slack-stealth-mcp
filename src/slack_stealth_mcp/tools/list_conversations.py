@@ -41,14 +41,16 @@ async def list_conversations(
     group_dms = []
 
     for conv in conversations:
-        # Resolve DM user names
+        # Use display_name directly - user resolution is done lazily when needed
+        # This avoids N+1 API calls for DMs
         display_name = conv.display_name
         if conv.is_im and conv.user:
-            try:
-                user = await client.get_user_info(conv.user)
-                display_name = f"@{user.display}"
-            except Exception:
-                display_name = f"@{conv.user}"
+            # Try cache first, don't make API call just for listing
+            cached_user = client._users_cache.get(conv.user)
+            if cached_user:
+                display_name = f"@{cached_user.display}"
+            else:
+                display_name = f"DM ({conv.user[:8]}...)"
 
         entry = {
             "id": conv.id,

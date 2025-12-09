@@ -76,12 +76,13 @@ async def get_context(
                 limit=context_size,
             )
 
-    # Resolve user names
+    # Format messages - use cached user names to avoid N API calls
     formatted_messages = []
     for msg in reversed(messages):  # Reverse to show oldest first
         user_name = "Unknown"
         if msg.user:
-            user_name = await client.resolve_user_name(msg.user)
+            cached = client._users_cache.get(msg.user)
+            user_name = cached.display if cached else msg.user[:8] + "..."
 
         formatted = {
             "ts": msg.ts,

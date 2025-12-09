@@ -85,12 +85,14 @@ async def search(
         sort_dir="desc",
     )
 
-    # Format results
+    # Format results - use cached user names to avoid N API calls
     formatted_messages = []
     for msg in results.messages:
+        # Use cache, don't make API call for each message
         user_name = "Unknown"
         if msg.user:
-            user_name = await client.resolve_user_name(msg.user)
+            cached = client._users_cache.get(msg.user)
+            user_name = cached.display if cached else msg.user[:8] + "..."
 
         formatted = {
             "ts": msg.ts,

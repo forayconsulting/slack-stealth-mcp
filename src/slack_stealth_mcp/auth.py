@@ -73,17 +73,33 @@ async def extract_tokens_from_browser(
                     "Please try again."
                 )
 
-            # Check if we're on a workspace page (indicates successful login)
-            current_url = page.url
+            # Check ALL pages in context - Slack often opens workspace in new tab
+            all_pages = context.pages
+            target_page = None
+            current_url = None
+
+            for p in all_pages:
+                url = p.url
+                if "/client/" in url or ("app.slack.com" in url and "/client/" in url):
+                    target_page = p
+                    current_url = url
+                    break
+
+            # If no workspace page found yet, keep the original page reference
+            if target_page is None:
+                current_url = page.url
+            else:
+                page = target_page  # Switch to the workspace page
 
             # Look for patterns that indicate we're logged in
             # - /client/ in URL means we're in the Slack app
             # - app.slack.com means we're in the web app
             if "/client/" in current_url or "app.slack.com" in current_url:
-                print("✓ Detected successful login, extracting tokens...")
+                print(f"✓ Detected successful login at: {current_url}")
+                print("   Extracting tokens...")
 
                 # Wait a moment for everything to load
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
 
                 # Extract xoxc token from localStorage
                 # Slack stores it in various localStorage keys
@@ -98,13 +114,16 @@ async def extract_tokens_from_browser(
                     }
                 """)
 
+                print(f"   Found {len(local_storage)} localStorage keys")
+
                 # Find xoxc token - it's usually in localConfig_v2 or similar
                 for key, value in local_storage.items():
                     if value and "xoxc-" in value:
-                        # Try to extract the token
-                        match = re.search(r'(xoxc-[a-zA-Z0-9-]+)', value)
+                        # Try to extract the token - include underscores in pattern
+                        match = re.search(r'(xoxc-[a-zA-Z0-9_-]+)', value)
                         if match:
                             xoxc_token = match.group(1)
+                            print(f"   ✓ Found xoxc token in key: {key[:30]}...")
                             break
                     # Also check for JSON-encoded values
                     if value and value.startswith('{'):
@@ -115,16 +134,33 @@ async def extract_tokens_from_browser(
                                 token = _find_token_in_dict(data, "xoxc-")
                                 if token:
                                     xoxc_token = token
+                                    print(f"   ✓ Found xoxc token in JSON key: {key[:30]}...")
                                     break
                         except json.JSONDecodeError:
                             pass
 
+                if not xoxc_token:
+                    print("   ⚠ Could not find xoxc token in localStorage")
+                    # Debug: show keys that might contain token
+                    for key in local_storage.keys():
+                        if "config" in key.lower() or "token" in key.lower():
+                            print(f"      Potential key: {key}")
+
                 # Extract xoxd cookie (the 'd' cookie)
                 cookies = await context.cookies()
+                print(f"   Found {len(cookies)} cookies")
                 for cookie in cookies:
                     if cookie["name"] == "d" and "slack.com" in cookie["domain"]:
                         xoxd_cookie = cookie["value"]
+                        print(f"   ✓ Found 'd' cookie for {cookie['domain']}")
                         break
+
+                if not xoxd_cookie:
+                    print("   ⚠ Could not find 'd' cookie")
+                    # Debug: show slack cookies
+                    for cookie in cookies:
+                        if "slack" in cookie.get("domain", ""):
+                            print(f"      Cookie: {cookie['name']} @ {cookie['domain']}")
 
                 # Try to get team name from URL or page content
                 if "app.slack.com/client/" in current_url:
@@ -135,16 +171,33 @@ async def extract_tokens_from_browser(
                         team_name = team_id  # We'll use team ID as name for now
 
                 # Also try to get team name from page title
+                # Title format is usually: "channel - TeamName" or "channel (Channel) - TeamName - X new items"
                 title = await page.title()
-                if " | " in title:
+                if " - " in title:
+                    # Extract team name (usually second part, before any "new items" suffix)
+                    parts = title.split(" - ")
+                    if len(parts) >= 2:
+                        # Team name is typically the second part
+                        candidate = parts[1].strip()
+                        # Remove notification counts like "4 new items"
+                        if not candidate.endswith("new items") and not candidate.endswith("new item"):
+                            team_name = candidate
+                        elif len(parts) >= 3:
+                            # Try third part if second was notification count
+                            team_name = parts[1].strip()
+                elif " | " in title:
                     team_name = title.split(" | ")[-1].strip()
                 elif "Slack" in title:
                     team_name = title.replace("Slack", "").strip(" -|")
 
                 if xoxc_token and xoxd_cookie:
-                    print(f"✓ Successfully extracted tokens for '{team_name or workspace_name}'")
+                    print(f"\n✓ Successfully extracted tokens for '{team_name or workspace_name}'")
                     await browser.close()
                     return xoxc_token, xoxd_cookie, team_name or workspace_name
+                else:
+                    # If we're on the right page but can't find tokens, wait and retry
+                    print("   Waiting for tokens to appear...")
+                    await asyncio.sleep(2)
 
             # Brief pause before checking again
             await asyncio.sleep(1)

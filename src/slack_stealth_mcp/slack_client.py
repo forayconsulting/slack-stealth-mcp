@@ -20,13 +20,13 @@ SLACK_API_BASE = "https://slack.com/api"
 class RateLimiter:
     """Token bucket rate limiter with exponential backoff."""
 
-    def __init__(self, requests_per_minute: float = 50):
+    def __init__(self, requests_per_second: float = 2.0):
         """Initialize rate limiter.
 
         Args:
-            requests_per_minute: Maximum requests per minute
+            requests_per_second: Maximum requests per second (default 2/sec, backs off on 429)
         """
-        self._interval = 60.0 / requests_per_minute
+        self._min_interval = 1.0 / requests_per_second
         self._last_request = 0.0
         self._lock = asyncio.Lock()
         self._backoff = 1.0
@@ -35,7 +35,7 @@ class RateLimiter:
         """Wait until a request can be made."""
         async with self._lock:
             now = time.monotonic()
-            wait_time = self._last_request + (self._interval * self._backoff) - now
+            wait_time = self._last_request + (self._min_interval * self._backoff) - now
             if wait_time > 0:
                 await asyncio.sleep(wait_time)
             self._last_request = time.monotonic()
@@ -165,19 +165,22 @@ class SlackClient:
         types: str = "public_channel,private_channel,mpim,im",
         exclude_archived: bool = True,
         limit: int = 200,
+        max_pages: int = 3,
     ) -> List[SlackConversation]:
-        """List all conversations the user has access to.
+        """List conversations the user has access to.
 
         Args:
             types: Comma-separated conversation types
             exclude_archived: Whether to exclude archived channels
             limit: Max results per page
+            max_pages: Maximum number of pages to fetch (default 3, set to 0 for unlimited)
 
         Returns:
             List of conversations
         """
         conversations: List[SlackConversation] = []
         cursor: Optional[str] = None
+        pages_fetched = 0
 
         while True:
             params: Dict[str, Any] = {
@@ -189,6 +192,7 @@ class SlackClient:
                 params["cursor"] = cursor
 
             data = await self._request("GET", "conversations.list", params=params)
+            pages_fetched += 1
 
             for ch in data.get("channels", []):
                 conv = SlackConversation(
@@ -212,7 +216,8 @@ class SlackClient:
                     self._last_read_cache[conv.id] = conv.last_read
 
             cursor = data.get("response_metadata", {}).get("next_cursor")
-            if not cursor:
+            # Stop if no more pages OR we've hit max_pages limit
+            if not cursor or (max_pages > 0 and pages_fetched >= max_pages):
                 break
 
         self._cache_time = time.monotonic()
@@ -485,6 +490,28 @@ class SlackClient:
             return user.display
         except SlackAPIError:
             return user_id
+
+    async def prefetch_users(self, user_ids: List[str], max_fetch: int = 20) -> None:
+        """Prefetch and cache info for multiple users.
+
+        This is useful before displaying messages to ensure user names are available.
+        Silently ignores errors - cache misses will fall back to user IDs.
+
+        Args:
+            user_ids: List of user IDs to prefetch
+            max_fetch: Maximum number of users to fetch (to respect rate limits)
+        """
+        # Filter out already-cached users and None values
+        uncached = [uid for uid in user_ids if uid and uid not in self._users_cache]
+        if not uncached:
+            return
+
+        # Limit to avoid rate limit issues
+        for user_id in uncached[:max_fetch]:
+            try:
+                await self.get_user_info(user_id)
+            except Exception:
+                pass  # Silently ignore - will show truncated ID as fallback
 
     # =========================================================================
     # Auth API
