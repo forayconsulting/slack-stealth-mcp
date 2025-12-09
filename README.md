@@ -73,7 +73,7 @@ Ask Claude things like:
 |------|-------------|
 | `slack_auth_status` | Check authentication status for workspaces |
 | `slack_auth_login` | Authenticate a new workspace (opens browser) |
-| `slack_get_unread` | Get all unread messages and mentions—perfect for "What's new?" |
+| `slack_get_unread` | Get unread messages across ALL workspaces—perfect for "What's new?" |
 | `slack_reply` | Send messages to channels, DMs, or threads |
 | `slack_search` | Search with full Slack syntax (in:, from:, has:, dates) |
 | `slack_get_context` | Get messages from a conversation for context |

@@ -16,32 +16,19 @@ def _get_cached_user_name(client: Any, user_id: str) -> str:
     return user_id[:8] + "..."  # Truncated ID as fallback
 
 
-async def get_unread(
+async def _get_unread_for_workspace(
     manager: WorkspaceManager,
-    include_channels: bool = True,
-    include_dms: bool = True,
-    include_mentions: bool = True,
-    max_messages_per_conversation: int = 5,
-    max_conversations_to_check: int = 20,  # Limit to avoid API overload
-    max_dms_to_scan: int = 30,  # Limit DMs to scan for unread status (performance)
-    workspace: str | None = None,
+    workspace: str,
+    include_channels: bool,
+    include_dms: bool,
+    include_mentions: bool,
+    max_messages_per_conversation: int,
+    max_conversations_to_check: int,
+    max_dms_to_scan: int,
 ) -> dict[str, Any]:
-    """Get all unread messages and mentions across the workspace.
+    """Get unread messages for a single workspace.
 
-    This is the "What's new?" tool - it fetches unread DMs, channel messages,
-    and recent mentions without marking anything as read.
-
-    Args:
-        manager: Workspace manager
-        include_channels: Include unread channel messages
-        include_dms: Include unread DMs
-        include_mentions: Search for recent mentions
-        max_messages_per_conversation: Max unread messages to fetch per conversation
-        max_conversations_to_check: Max conversations to check for unreads (limits API calls)
-        workspace: Workspace name (uses default if not specified)
-
-    Returns:
-        Dictionary with categorized unread messages and summary
+    This is the core implementation - extracted to support multi-workspace iteration.
     """
     client = manager.get_client(workspace)
 
@@ -341,7 +328,7 @@ async def get_unread(
 
     result: dict[str, Any] = {
         "summary": summary,
-        "workspace": workspace or manager.default_workspace,
+        "workspace": workspace,
     }
 
     if unread_dms:
@@ -358,3 +345,117 @@ async def get_unread(
     }
 
     return result
+
+
+def _combine_workspace_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Combine results from multiple workspaces into a single response."""
+    # Calculate combined totals
+    total_dms = sum(r.get("totals", {}).get("unread_dm_messages", 0) for r in results)
+    total_channels = sum(r.get("totals", {}).get("channels_with_unread", 0) for r in results)
+    total_mentions = sum(r.get("totals", {}).get("mentions", 0) for r in results)
+
+    # Build combined summary
+    total_unread = total_dms + total_channels
+    workspaces_with_unreads = sum(
+        1 for r in results
+        if r.get("totals", {}).get("unread_dm_messages", 0) > 0
+        or r.get("totals", {}).get("channels_with_unread", 0) > 0
+    )
+
+    if total_unread > 0:
+        summary = f"{total_unread} unread across {workspaces_with_unreads} workspace(s)"
+    else:
+        summary = "No unread messages across all workspaces"
+
+    return {
+        "summary": summary,
+        "workspaces": results,
+        "totals": {
+            "unread_dm_messages": total_dms,
+            "channels_with_unread": total_channels,
+            "mentions": total_mentions,
+        },
+    }
+
+
+async def get_unread(
+    manager: WorkspaceManager,
+    include_channels: bool = True,
+    include_dms: bool = True,
+    include_mentions: bool = True,
+    max_messages_per_conversation: int = 5,
+    max_conversations_to_check: int = 20,  # Limit to avoid API overload
+    max_dms_to_scan: int = 30,  # Limit DMs to scan for unread status (performance)
+    workspace: str | None = None,
+) -> dict[str, Any]:
+    """Get all unread messages and mentions across workspaces.
+
+    This is the "What's new?" tool - it fetches unread DMs, channel messages,
+    and recent mentions without marking anything as read.
+
+    Args:
+        manager: Workspace manager
+        include_channels: Include unread channel messages
+        include_dms: Include unread DMs
+        include_mentions: Search for recent mentions
+        max_messages_per_conversation: Max unread messages to fetch per conversation
+        max_conversations_to_check: Max conversations to check for unreads (limits API calls)
+        max_dms_to_scan: Limit DMs to scan for performance
+        workspace: Specific workspace to check (checks ALL workspaces if not specified)
+
+    Returns:
+        Dictionary with categorized unread messages and summary
+    """
+    # Determine which workspaces to check
+    if workspace:
+        workspaces_to_check = [workspace]
+    else:
+        workspaces_to_check = manager.workspace_names
+
+    # If no workspaces configured, return early
+    if not workspaces_to_check:
+        return {
+            "summary": "No workspaces configured",
+            "needs_auth": True,
+            "totals": {
+                "unread_dm_messages": 0,
+                "channels_with_unread": 0,
+                "mentions": 0,
+            },
+        }
+
+    # Collect results from each workspace
+    all_results: list[dict[str, Any]] = []
+
+    for ws_name in workspaces_to_check:
+        try:
+            result = await _get_unread_for_workspace(
+                manager=manager,
+                workspace=ws_name,
+                include_channels=include_channels,
+                include_dms=include_dms,
+                include_mentions=include_mentions,
+                max_messages_per_conversation=max_messages_per_conversation,
+                max_conversations_to_check=max_conversations_to_check,
+                max_dms_to_scan=max_dms_to_scan,
+            )
+            all_results.append(result)
+        except Exception as e:
+            # If one workspace fails, still return results from others
+            all_results.append({
+                "workspace": ws_name,
+                "summary": f"Error: {str(e)}",
+                "error": str(e),
+                "totals": {
+                    "unread_dm_messages": 0,
+                    "channels_with_unread": 0,
+                    "mentions": 0,
+                },
+            })
+
+    # If only one workspace, return its result directly
+    if len(all_results) == 1:
+        return all_results[0]
+
+    # Multiple workspaces - combine results
+    return _combine_workspace_results(all_results)
