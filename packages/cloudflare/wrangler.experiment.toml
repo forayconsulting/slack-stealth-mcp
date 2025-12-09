@@ -1,0 +1,10 @@
+name = "slack-browser-test"
+main = "experiments/browser-auth-test.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Browser Rendering binding
+browser = { binding = "BROWSER" }
+
+[vars]
+ENVIRONMENT = "experiment"

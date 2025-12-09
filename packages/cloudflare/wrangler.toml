@@ -1,0 +1,44 @@
+name = "slack-stealth-mcp"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Browser Rendering (for interactive auth)
+browser = { binding = "BROWSER" }
+
+# KV Namespaces
+[[kv_namespaces]]
+binding = "TOKENS"
+id = "c4765516cf0a445890794a6085938048"
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "b13a5f492a4843c49461773e7b0ec008"
+
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "5031aec2c67f45398cda5b6f8b976e07"
+
+# Durable Objects
+[[durable_objects.bindings]]
+name = "BROWSER_SESSION"
+class_name = "BrowserAuthSession"
+
+[[durable_objects.bindings]]
+name = "MCP_SESSION"
+class_name = "SlackMcpServer"
+
+# Migrations
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BrowserAuthSession"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SlackMcpServer"]
+
+[vars]
+ENVIRONMENT = "development"
+
+# Secrets (set via wrangler secret put):
+# - ENCRYPTION_KEY (for token encryption)
