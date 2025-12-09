@@ -1,12 +1,24 @@
 # Slack Stealth MCP
 
-An MCP (Model Context Protocol) server that enables Claude to interact with Slack on your behalf using session tokens. Read messages, search, and reply—all without triggering read receipts or typing indicators.
+An MCP (Model Context Protocol) server that enables Claude to interact with Slack on your behalf—**no admin approval required**.
+
+## Why "Stealth"?
+
+Traditional Slack integrations require creating a Slack App and getting workspace admin approval. This creates friction for personal productivity tools—you shouldn't need IT approval just to let Claude help you manage your own messages.
+
+**Slack Stealth MCP takes a different approach:** it uses your existing browser session tokens to access Slack as *you*, with your existing permissions. No app installation, no OAuth flows, no admin approval. Just log in to Slack in a browser window and the tokens are captured automatically.
+
+This means:
+- **Works on any workspace** you can log into—even heavily restricted enterprise workspaces
+- **No permissions to request**—you already have access to everything you can see in Slack
+- **No app review process**—start using it immediately
+- **Your credentials stay local**—tokens are stored on your machine, never sent to third parties
 
 ## Features
 
-- **OAuth-like Authentication**: Just log in to Slack in a browser window—tokens are captured automatically
+- **Zero-Friction Auth**: Log in to Slack in a browser window—tokens are captured automatically
+- **No Admin Approval**: Uses your existing session, not a Slack App
 - **Stealth Reading**: Fetch messages without marking them as read
-- **No Typing Indicators**: Slack's API doesn't support typing indicators, so you can't accidentally trigger them
 - **Multi-Workspace**: Support multiple Slack workspaces
 - **Comprehensive Search**: Full Slack search syntax support
 - **Thread Support**: Read and reply to threads
@@ -82,7 +94,9 @@ Ask Claude things like:
 | `slack_list_conversations` | List all available channels and DMs |
 | `slack_mark_read` | Explicitly mark conversations as read |
 
-## Stealth Behavior
+## Read Receipt Behavior
+
+As a bonus, the Slack APIs used by this tool don't trigger read receipts or typing indicators:
 
 | Operation | Marks as Read? | Shows Typing? |
 |-----------|---------------|---------------|
@@ -128,12 +142,26 @@ export SLACK_XOXD_COOKIE="xoxd-..."
 5. Go to **Application** tab → **Cookies** → `slack.com`
 6. Find the cookie named `d` — the value starting with `xoxd-`
 
+## How Authentication Works
+
+When you log into Slack in your browser, Slack stores two tokens:
+- **xoxc token**: A session token stored in localStorage
+- **xoxd cookie**: A session cookie that authenticates the token
+
+These are the same credentials your browser uses when you access Slack. The `slack-stealth-auth` command opens a browser, lets you log in normally, then extracts these tokens and saves them locally.
+
+This approach:
+- Supports any login method (SSO, 2FA, SAML, etc.)
+- Requires no Slack App creation or approval
+- Gives you exactly the same access you have in the browser
+- Keeps credentials local to your machine
+
 ## Important Notes
 
-- **Unofficial API Usage**: This uses Slack session tokens (xoxc/xoxd) which are not officially supported by Slack. While Slack doesn't actively block this, they don't guarantee stability.
-- **Token Lifetime**: Tokens last approximately 1 year. Re-run `slack-stealth-auth` if you get authentication errors.
+- **Session Tokens**: This uses Slack session tokens (xoxc/xoxd) rather than official Bot or User OAuth tokens. Slack doesn't officially support this, but it's the same mechanism the web client uses.
+- **Token Lifetime**: Tokens typically last several months to a year. Re-run `slack-stealth-auth` if you get authentication errors.
 - **Rate Limits**: Slack has rate limits. The server handles these automatically with exponential backoff.
-- **Personal Use**: This is intended for personal productivity with your own Slack account.
+- **Personal Use**: This is intended for personal productivity with your own Slack account—you're accessing Slack as yourself, with your own permissions.
 
 ## Development
 
