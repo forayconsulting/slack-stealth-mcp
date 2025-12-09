@@ -18,6 +18,7 @@ from .tools import (
     get_unread,
     list_conversations,
     mark_read,
+    react,
     reply,
     search,
 )
@@ -319,6 +320,46 @@ If no timestamp is provided, marks all messages in the conversation as read.""",
             "required": ["channel"],
         },
     ),
+    Tool(
+        name="slack_react",
+        description="""Add or remove an emoji reaction on a message.
+
+Perfect for acknowledging messages without sending a full reply.
+Common reactions: thumbsup, pray (thanks), eyes (noted), heart, fire, 100, joy (funny),
+upside_down_face, raised_hands (celebration), melting_face, partyparrot (custom).
+
+Use emoji names without colons (e.g., "thumbsup" not ":thumbsup:").
+Supports skin tone modifiers (e.g., "thumbsup::skin-tone-3").
+
+IMPORTANT: This does NOT mark messages as read.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "channel": {
+                    "type": "string",
+                    "description": "Channel ID containing the message",
+                },
+                "message_ts": {
+                    "type": "string",
+                    "description": "Timestamp of the message to react to",
+                },
+                "emoji": {
+                    "type": "string",
+                    "description": "Emoji name without colons (e.g., 'thumbsup', 'heart', 'eyes')",
+                },
+                "remove": {
+                    "type": "boolean",
+                    "description": "Remove reaction instead of adding (default: false)",
+                    "default": False,
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace name (uses default if not specified)",
+                },
+            },
+            "required": ["channel", "message_ts", "emoji"],
+        },
+    ),
 ]
 
 
@@ -403,6 +444,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 manager=manager,
                 channel=arguments["channel"],
                 timestamp=arguments.get("timestamp"),
+                workspace=arguments.get("workspace"),
+            )
+
+        elif name == "slack_react":
+            result = await react(
+                manager=manager,
+                channel=arguments["channel"],
+                message_ts=arguments["message_ts"],
+                emoji=arguments["emoji"],
+                remove=arguments.get("remove", False),
                 workspace=arguments.get("workspace"),
             )
 

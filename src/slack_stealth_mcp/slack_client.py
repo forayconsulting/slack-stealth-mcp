@@ -396,6 +396,38 @@ class SlackClient:
         return self._parse_message(data["message"])
 
     # =========================================================================
+    # Reactions API
+    # =========================================================================
+
+    async def add_reaction(self, channel: str, timestamp: str, name: str) -> None:
+        """Add an emoji reaction to a message.
+
+        Args:
+            channel: Channel ID containing the message
+            timestamp: Message timestamp to react to
+            name: Emoji name without colons (e.g., "thumbsup", not ":thumbsup:")
+        """
+        await self._request(
+            "POST",
+            "reactions.add",
+            data={"channel": channel, "timestamp": timestamp, "name": name},
+        )
+
+    async def remove_reaction(self, channel: str, timestamp: str, name: str) -> None:
+        """Remove an emoji reaction from a message.
+
+        Args:
+            channel: Channel ID containing the message
+            timestamp: Message timestamp to remove reaction from
+            name: Emoji name without colons (e.g., "thumbsup", not ":thumbsup:")
+        """
+        await self._request(
+            "POST",
+            "reactions.remove",
+            data={"channel": channel, "timestamp": timestamp, "name": name},
+        )
+
+    # =========================================================================
     # Search API
     # =========================================================================
 

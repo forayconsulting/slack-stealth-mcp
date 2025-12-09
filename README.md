@@ -75,6 +75,7 @@ Ask Claude things like:
 | `slack_auth_login` | Authenticate a new workspace (opens browser) |
 | `slack_get_unread` | Get unread messages across ALL workspaces—perfect for "What's new?" |
 | `slack_reply` | Send messages to channels, DMs, or threads |
+| `slack_react` | Add/remove emoji reactions to acknowledge messages without replying |
 | `slack_search` | Search with full Slack syntax (in:, from:, has:, dates) |
 | `slack_get_context` | Get messages from a conversation for context |
 | `slack_list_conversations` | List all available channels and DMs |
@@ -90,6 +91,7 @@ As a bonus, the Slack APIs used by this tool don't trigger read receipts or typi
 | Search | No | No |
 | Get context | No | No |
 | Send message | No | No |
+| Add reaction | No | No |
 | Mark as read | Yes (explicit) | No |
 
 ## Manual Authentication
