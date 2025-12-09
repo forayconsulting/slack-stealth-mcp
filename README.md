@@ -16,7 +16,7 @@ This means:
 
 ## Features
 
-- **Zero-Friction Auth**: Log in to Slack in a browser window—tokens are captured automatically
+- **Zero-Friction Auth**: Just ask Claude about Slack—if you're not logged in, a browser opens automatically
 - **No Admin Approval**: Uses your existing session, not a Slack App
 - **Stealth Reading**: Fetch messages without marking them as read
 - **Multi-Workspace**: Support multiple Slack workspaces
@@ -43,25 +43,7 @@ pip install -e .
 playwright install chromium
 ```
 
-### 2. Authenticate
-
-Run the authentication command—a browser window will open:
-
-```bash
-slack-stealth-auth
-```
-
-1. Log in to Slack normally (supports SSO, 2FA, etc.)
-2. Once logged in, tokens are automatically captured
-3. Config is saved to `~/.config/slack-stealth-mcp/config.json`
-
-**Add more workspaces:**
-```bash
-slack-stealth-auth --workspace work
-slack-stealth-auth --workspace personal
-```
-
-### 3. Add to Claude Desktop
+### 2. Add to Claude Desktop
 
 Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
@@ -75,7 +57,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 }
 ```
 
-### 4. Use with Claude
+### 3. Use with Claude
 
 Ask Claude things like:
 - "What's new in Slack?"
@@ -83,10 +65,14 @@ Ask Claude things like:
 - "Reply to John's last message saying I'll review it tomorrow"
 - "Show me unread DMs"
 
+**First time?** Claude will detect no workspace is configured and automatically open a browser for you to log in. Just complete the Slack login (supports SSO, 2FA, etc.) and Claude will pick up where you left off.
+
 ## Available Tools
 
 | Tool | Description |
 |------|-------------|
+| `slack_auth_status` | Check authentication status for workspaces |
+| `slack_auth_login` | Authenticate a new workspace (opens browser) |
 | `slack_get_unread` | Get all unread messages and mentions—perfect for "What's new?" |
 | `slack_reply` | Send messages to channels, DMs, or threads |
 | `slack_search` | Search with full Slack syntax (in:, from:, has:, dates) |
@@ -105,6 +91,21 @@ As a bonus, the Slack APIs used by this tool don't trigger read receipts or typi
 | Get context | No | No |
 | Send message | No | No |
 | Mark as read | Yes (explicit) | No |
+
+## Manual Authentication
+
+You can also authenticate from the command line:
+
+```bash
+# Authenticate (opens browser)
+slack-stealth-auth
+
+# Add additional workspaces
+slack-stealth-auth --workspace work
+slack-stealth-auth --workspace personal
+```
+
+Config is saved to `~/.config/slack-stealth-mcp/config.json`.
 
 ## Manual Token Configuration
 

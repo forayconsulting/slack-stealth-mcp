@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Set
+import asyncio
+from typing import Any, Set
 
 from ..workspace import WorkspaceManager
 
@@ -22,6 +23,7 @@ async def get_unread(
     include_mentions: bool = True,
     max_messages_per_conversation: int = 5,
     max_conversations_to_check: int = 20,  # Limit to avoid API overload
+    max_dms_to_scan: int = 30,  # Limit DMs to scan for unread status (performance)
     workspace: str | None = None,
 ) -> dict[str, Any]:
     """Get all unread messages and mentions across the workspace.
@@ -59,38 +61,74 @@ async def get_unread(
         # Dedicated call for DMs only
         dm_conversations = await client.list_conversations(
             types="im,mpim",  # Only DMs and group DMs
-            limit=50,  # Limit since we'll check each one
-            max_pages=1,
+            limit=100,  # Get more DMs to ensure we find all unreads
+            max_pages=2,
         )
 
-        # For each DM, get detailed info with unread count
-        # (conversations.list doesn't include unread_count, but conversations.info does)
-        # NOTE: This is slow (1 API call per DM), so we limit to 15 most recent
-        dm_convs_with_unread = []
-        for conv in dm_conversations[:15]:  # Limit API calls for performance
+        # Check DMs for unread status using parallel requests for speed
+        # conversations.list doesn't include unread_count, but conversations.info does
+        # Limit to max_dms_to_scan for performance (checking each DM = 1 API call)
+        async def check_dm_unread(conv: Any) -> tuple[Any, int] | None:
+            """Check if a DM has unreads, return (detailed_info, unread_count) if so."""
             try:
                 detailed = await client.get_conversation_info(conv.id)
+
+                # Check unread_count fields first (works for regular DMs)
                 if detailed.unread_count_display and detailed.unread_count_display > 0:
-                    dm_convs_with_unread.append(detailed)
-                    if detailed.user:
-                        user_ids_to_prefetch.add(detailed.user)
+                    return (detailed, detailed.unread_count_display)
+                if detailed.unread_count and detailed.unread_count > 0:
+                    return (detailed, detailed.unread_count)
+
+                # For MPIMs, unread_count is often None - check via last_read vs latest message
+                if detailed.is_mpim and detailed.last_read:
+                    # Get just the latest message to compare timestamps
+                    msgs = await client.get_conversation_history(channel=conv.id, limit=1)
+                    if msgs and msgs[0].ts > detailed.last_read:
+                        # Count unread by fetching messages after last_read
+                        unread_msgs = await client.get_conversation_history(
+                            channel=conv.id, oldest=detailed.last_read, limit=10
+                        )
+                        return (detailed, len(unread_msgs))
             except Exception:
-                pass  # Skip if we can't get info
+                pass
+            return None
+
+        # Only scan first N DMs for performance (they're sorted by recent activity)
+        dms_to_check = dm_conversations[:max_dms_to_scan]
+
+        # Process DMs in parallel batches
+        # Results are tuples of (conv_info, unread_count)
+        dm_convs_with_unread: list[tuple[Any, int]] = []
+        batch_size = 15  # Parallel batch size
+        for i in range(0, len(dms_to_check), batch_size):
+            batch = dms_to_check[i:i + batch_size]
+            results = await asyncio.gather(*[check_dm_unread(conv) for conv in batch])
+            for result in results:
+                if result is not None:
+                    conv, unread_count = result
+                    dm_convs_with_unread.append((conv, unread_count))
+                    if conv.user:
+                        user_ids_to_prefetch.add(conv.user)
 
         # Sort by unread count to prioritize most active
-        dm_convs_with_unread.sort(key=lambda c: c.unread_count_display or 0, reverse=True)
+        dm_convs_with_unread.sort(key=lambda x: x[1], reverse=True)
 
         # Prefetch DM participant names (single batch call)
         if user_ids_to_prefetch:
             await client.prefetch_users(list(user_ids_to_prefetch))
 
-        for conv in dm_convs_with_unread[:max_conversations_to_check]:
+        for conv, unread_count in dm_convs_with_unread[:max_conversations_to_check]:
             checked_count += 1
             # Fetch unread messages
+            # Note: "Mark as unread" sets last_read to "0000000000.000000" which is invalid
+            # In that case, just fetch recent messages without the oldest filter
+            oldest = conv.last_read
+            if oldest and oldest.startswith("0000000000"):
+                oldest = None  # Invalid timestamp, fetch recent messages instead
             try:
                 messages = await client.get_conversation_history(
                     channel=conv.id,
-                    oldest=conv.last_read if conv.last_read else None,
+                    oldest=oldest,
                     limit=max_messages_per_conversation,
                 )
             except Exception:
@@ -103,17 +141,26 @@ async def get_unread(
                     if msg.user:
                         user_ids_to_prefetch.add(msg.user)
 
-                # Get DM name from cache (should be populated now)
-                dm_name = conv.display_name
+                # Get DM name - handle both regular DMs and MPIMs
                 if conv.is_im and conv.user:
                     dm_name = f"@{_get_cached_user_name(client, conv.user)}"
+                elif conv.is_mpim and conv.name:
+                    # MPIM name is like "mpdm-user1--user2--user3-1", extract usernames
+                    parts = conv.name.replace("mpdm-", "").split("--")
+                    # Remove trailing number suffix
+                    parts = [p.split("-")[0] if p else p for p in parts]
+                    dm_name = ", ".join(parts[:3])  # Limit to 3 names
+                    if len(parts) > 3:
+                        dm_name += f" +{len(parts) - 3}"
+                else:
+                    dm_name = conv.display_name or conv.name or conv.id
 
                 formatted_messages = []
                 for msg in reversed(messages):
                     user_name = _get_cached_user_name(client, msg.user) if msg.user else "Unknown"
                     formatted_messages.append({
                         "user": user_name,
-                        "text": msg.text[:200] + ("..." if len(msg.text) > 200 else ""),
+                        "text": msg.text,  # Full message text
                         "time": msg.timestamp.strftime("%H:%M"),
                         "ts": msg.ts,
                     })
@@ -121,11 +168,12 @@ async def get_unread(
                 unread_dms.append({
                     "channel_id": conv.id,
                     "name": dm_name,
-                    "unread_count": conv.unread_count_display,
+                    "unread_count": unread_count,
                     "messages": formatted_messages,
                 })
 
     # Process channels - fetch separately from DMs
+    # NOTE: conversations.list doesn't return last_read - must call conversations.info
     remaining_budget = max_conversations_to_check - checked_count
     if include_channels and remaining_budget > 0:
         # Dedicated call for channels only
@@ -135,15 +183,63 @@ async def get_unread(
             max_pages=2,
         )
 
-        channel_convs = [c for c in channel_conversations if c.last_read]
+        # Check channels for unread status using parallel requests
+        # Like DMs, we need conversations.info to get last_read
+        async def check_channel_unread(conv: Any) -> tuple[Any, int] | None:
+            """Check if a channel has unreads, return (detailed_info, unread_count) if so."""
+            try:
+                detailed = await client.get_conversation_info(conv.id)
 
-        for conv in channel_convs[:remaining_budget]:
-            # Get recent messages to check if there are unreads
-            messages = await client.get_conversation_history(
-                channel=conv.id,
-                oldest=conv.last_read,
-                limit=max_messages_per_conversation,
-            )
+                # Check unread_count fields
+                if detailed.unread_count_display and detailed.unread_count_display > 0:
+                    return (detailed, detailed.unread_count_display)
+                if detailed.unread_count and detailed.unread_count > 0:
+                    return (detailed, detailed.unread_count)
+
+                # Fallback: compare last_read with latest message
+                if detailed.last_read:
+                    msgs = await client.get_conversation_history(channel=conv.id, limit=1)
+                    if msgs and msgs[0].ts > detailed.last_read:
+                        # Count unread messages
+                        unread_msgs = await client.get_conversation_history(
+                            channel=conv.id, oldest=detailed.last_read, limit=10
+                        )
+                        if unread_msgs:
+                            return (detailed, len(unread_msgs))
+            except Exception:
+                pass
+            return None
+
+        # Limit channels to check for performance
+        max_channels_to_scan = 50
+        channels_to_check = channel_conversations[:max_channels_to_scan]
+
+        # Process channels in parallel batches
+        channel_convs_with_unread: list[tuple[Any, int]] = []
+        batch_size = 15
+        for i in range(0, len(channels_to_check), batch_size):
+            batch = channels_to_check[i:i + batch_size]
+            results = await asyncio.gather(*[check_channel_unread(conv) for conv in batch])
+            for result in results:
+                if result is not None:
+                    channel_convs_with_unread.append(result)
+
+        # Sort by unread count to prioritize most active
+        channel_convs_with_unread.sort(key=lambda x: x[1], reverse=True)
+
+        for conv, unread_count in channel_convs_with_unread[:remaining_budget]:
+            # Fetch unread messages
+            oldest = conv.last_read
+            if oldest and oldest.startswith("0000000000"):
+                oldest = None  # Invalid timestamp from "Mark as unread"
+            try:
+                messages = await client.get_conversation_history(
+                    channel=conv.id,
+                    oldest=oldest,
+                    limit=max_messages_per_conversation,
+                )
+            except Exception:
+                messages = []
 
             if messages:
                 # Collect message author IDs
@@ -156,7 +252,7 @@ async def get_unread(
                     user_name = _get_cached_user_name(client, msg.user) if msg.user else "Unknown"
                     formatted_messages.append({
                         "user": user_name,
-                        "text": msg.text[:200] + ("..." if len(msg.text) > 200 else ""),
+                        "text": msg.text,  # Full message text
                         "time": msg.timestamp.strftime("%H:%M"),
                         "ts": msg.ts,
                         "thread_ts": msg.thread_ts if msg.is_thread_reply else None,
@@ -164,8 +260,8 @@ async def get_unread(
 
                 unread_channels.append({
                     "channel_id": conv.id,
-                    "name": conv.display_name,
-                    "unread_count": len(messages),
+                    "name": conv.display_name or conv.name,
+                    "unread_count": unread_count,
                     "messages": formatted_messages,
                 })
 
@@ -174,7 +270,7 @@ async def get_unread(
     if user_ids_to_prefetch:
         await client.prefetch_users(list(user_ids_to_prefetch))
 
-    # Search for recent mentions
+    # Search for recent mentions - only include UNREAD ones
     if include_mentions:
         try:
             # Get current user info
@@ -185,7 +281,7 @@ async def get_unread(
                 # Search for messages mentioning the user
                 results = await client.search_messages(
                     query=f"<@{user_id}>",
-                    count=10,
+                    count=20,  # Fetch more since we'll filter
                     sort="timestamp",
                     sort_dir="desc",
                 )
@@ -195,14 +291,35 @@ async def get_unread(
                 if mention_authors:
                     await client.prefetch_users(mention_authors)
 
+                # Filter to only unread mentions by checking channel read state
+                # Cache channel info to avoid duplicate API calls
+                channel_read_cache: dict[str, str | None] = {}
+
                 for msg in results.messages:
-                    user_name = _get_cached_user_name(client, msg.user) if msg.user else "Unknown"
-                    mentions.append({
-                        "user": user_name,
-                        "text": msg.text[:200] + ("..." if len(msg.text) > 200 else ""),
-                        "time": msg.timestamp.strftime("%Y-%m-%d %H:%M"),
-                        "ts": msg.ts,
-                    })
+                    # Get channel's last_read (with caching)
+                    if msg.channel not in channel_read_cache:
+                        try:
+                            channel_info = await client.get_conversation_info(msg.channel)
+                            channel_read_cache[msg.channel] = channel_info.last_read
+                        except Exception:
+                            channel_read_cache[msg.channel] = None
+
+                    last_read = channel_read_cache.get(msg.channel)
+
+                    # Only include if message is unread (ts > last_read)
+                    if last_read and msg.ts > last_read:
+                        user_name = _get_cached_user_name(client, msg.user) if msg.user else "Unknown"
+                        mentions.append({
+                            "user": user_name,
+                            "text": msg.text,  # Full message text
+                            "time": msg.timestamp.strftime("%Y-%m-%d %H:%M"),
+                            "ts": msg.ts,
+                            "channel_id": msg.channel,
+                        })
+
+                        # Limit to 10 unread mentions
+                        if len(mentions) >= 10:
+                            break
         except Exception:
             pass  # Mentions are supplementary, don't fail if search fails
 

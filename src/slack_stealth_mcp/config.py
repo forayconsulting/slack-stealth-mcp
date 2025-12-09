@@ -63,16 +63,17 @@ def _load_from_file(path: Path) -> Config:
 
 
 def _load_from_env() -> Config:
-    """Load configuration from environment variables."""
+    """Load configuration from environment variables.
+
+    Returns an empty Config if no environment variables are set,
+    allowing the server to start without configuration.
+    """
     xoxc = os.environ.get("SLACK_XOXC_TOKEN")
     xoxd = os.environ.get("SLACK_XOXD_COOKIE")
 
     if not xoxc or not xoxd:
-        raise ValueError(
-            "No configuration found. Either:\n"
-            f"  1. Create config file at {DEFAULT_CONFIG_PATH}\n"
-            "  2. Set SLACK_XOXC_TOKEN and SLACK_XOXD_COOKIE environment variables"
-        )
+        # Return empty config - server can start and auth tools will be available
+        return Config(workspaces={}, default_workspace=None)
 
     workspace = WorkspaceConfig(
         xoxc_token=xoxc,

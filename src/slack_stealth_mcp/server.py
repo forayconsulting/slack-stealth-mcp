@@ -11,7 +11,16 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from .config import load_config
-from .tools import get_context, get_unread, list_conversations, mark_read, reply, search
+from .tools import (
+    auth_login,
+    auth_status,
+    get_context,
+    get_unread,
+    list_conversations,
+    mark_read,
+    reply,
+    search,
+)
 from .workspace import WorkspaceManager
 
 # Initialize MCP server
@@ -34,13 +43,71 @@ def get_manager() -> WorkspaceManager:
 
 TOOLS = [
     Tool(
+        name="slack_auth_status",
+        description="""Check Slack authentication status for configured workspaces.
+
+Returns the authentication state for each workspace:
+- Whether tokens are configured
+- Whether tokens are valid (tests against Slack API)
+- User and team info for valid connections
+
+IMPORTANT: If the result shows needs_auth=true or no workspaces are configured,
+immediately call slack_auth_login to initiate authentication - do not ask the
+user for permission first. The auth flow opens a browser where they can log in.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace": {
+                    "type": "string",
+                    "description": "Specific workspace to check (checks all if not specified)",
+                },
+                "test_connection": {
+                    "type": "boolean",
+                    "description": "Actually test tokens against Slack API (default: true)",
+                    "default": True,
+                },
+            },
+        },
+    ),
+    Tool(
+        name="slack_auth_login",
+        description="""Initiate Slack authentication flow for a new or expired workspace.
+
+This opens a browser window where the user can log into Slack. The tool BLOCKS
+until authentication completes (up to 10 minutes), then automatically reloads
+the configuration.
+
+Call this automatically when slack_auth_status shows no workspaces or needs_auth=true.
+Do not ask for user permission - just call this tool. The browser will appear,
+the user will log in, and when complete this tool returns with the new workspace info.
+
+After this returns successfully, proceed with the original Slack request.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace": {
+                    "type": "string",
+                    "description": "Name for the workspace (optional - uses Slack team name if not specified)",
+                },
+                "set_default": {
+                    "type": "boolean",
+                    "description": "Set this as the default workspace (default: true)",
+                    "default": True,
+                },
+            },
+        },
+    ),
+    Tool(
         name="slack_get_unread",
         description="""Get all unread messages and mentions across your Slack workspace.
 
 This is the "What's new?" tool - perfect for catching up on activity.
 Returns unread DMs, channel messages with new activity, and recent mentions.
 
-IMPORTANT: This does NOT mark any messages as read. Your read state is preserved.""",
+IMPORTANT: This does NOT mark any messages as read. Your read state is preserved.
+
+If this fails due to missing authentication, call slack_auth_status then
+slack_auth_login to set up authentication automatically.""",
         inputSchema={
             "type": "object",
             "properties": {
@@ -267,7 +334,21 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     manager = get_manager()
 
     try:
-        if name == "slack_get_unread":
+        if name == "slack_auth_status":
+            result = await auth_status(
+                manager=manager,
+                workspace=arguments.get("workspace"),
+                test_connection=arguments.get("test_connection", True),
+            )
+
+        elif name == "slack_auth_login":
+            result = await auth_login(
+                manager=manager,
+                workspace=arguments.get("workspace"),
+                set_default=arguments.get("set_default", True),
+            )
+
+        elif name == "slack_get_unread":
             result = await get_unread(
                 manager=manager,
                 workspace=arguments.get("workspace"),
@@ -338,19 +419,18 @@ async def run_server() -> None:
     """Run the MCP server."""
     global _manager
 
-    # Load configuration
-    try:
-        config = load_config()
-    except ValueError as e:
-        print(f"Configuration error: {e}")
-        return
+    # Load configuration (returns empty config if none exists)
+    config = load_config()
 
     # Initialize workspace manager
     _manager = WorkspaceManager(config)
 
-    # Test connections
-    print(f"Configured workspaces: {', '.join(_manager.workspace_names)}")
-    print(f"Default workspace: {_manager.default_workspace}")
+    # Log workspace status
+    if _manager.workspace_names:
+        print(f"Configured workspaces: {', '.join(_manager.workspace_names)}")
+        print(f"Default workspace: {_manager.default_workspace}")
+    else:
+        print("No workspaces configured. Use slack_auth_login to authenticate.")
 
     # Run the server
     async with stdio_server() as (read_stream, write_stream):

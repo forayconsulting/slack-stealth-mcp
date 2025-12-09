@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .config import Config
+from .config import Config, load_config
 from .slack_client import SlackClient
 
 
@@ -89,6 +89,54 @@ class WorkspaceManager:
         """Close all workspace connections."""
         for client in self._clients.values():
             await client.close()
+
+    async def reload_config(self) -> dict[str, Any]:
+        """Reload configuration from disk and update clients.
+
+        Returns:
+            Dict with reload status including added/removed/updated workspaces
+        """
+        try:
+            new_config = load_config()
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        changes: dict[str, list[str]] = {
+            "added": [],
+            "removed": [],
+            "updated": [],
+        }
+
+        # Find removed workspaces
+        for name in list(self._clients.keys()):
+            if name not in new_config.workspaces:
+                await self._clients[name].close()
+                del self._clients[name]
+                changes["removed"].append(name)
+
+        # Find added or updated workspaces
+        for name, ws_config in new_config.workspaces.items():
+            if name not in self._clients:
+                self._clients[name] = SlackClient(ws_config)
+                changes["added"].append(name)
+            elif name in self._config.workspaces:
+                old_ws = self._config.workspaces[name]
+                if (
+                    ws_config.xoxc_token != old_ws.xoxc_token
+                    or ws_config.xoxd_cookie != old_ws.xoxd_cookie
+                ):
+                    await self._clients[name].close()
+                    self._clients[name] = SlackClient(ws_config)
+                    changes["updated"].append(name)
+
+        self._config = new_config
+
+        return {
+            "ok": True,
+            "changes": changes,
+            "workspaces": list(self._clients.keys()),
+            "default_workspace": self._config.default_workspace,
+        }
 
     async def __aenter__(self) -> "WorkspaceManager":
         """Async context manager entry."""
