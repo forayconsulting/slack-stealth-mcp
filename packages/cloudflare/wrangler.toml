@@ -37,6 +37,17 @@ new_sqlite_classes = ["BrowserAuthSession"]
 tag = "v2"
 new_sqlite_classes = ["SlackMcpServer"]
 
+# v3 is a no-op resume marker: the live worker was already deployed at tag v3
+# (with SlackMcpServer already created), so this lets wrangler recognize that
+# state and skip re-applying v1/v2, which would fail re-creating that class.
+[[migrations]]
+tag = "v3"
+
+# v4 creates BrowserAuthSession, which the live worker at v3 never had.
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["BrowserAuthSession"]
+
 [vars]
 ENVIRONMENT = "development"
 
