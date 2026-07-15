@@ -3,7 +3,8 @@
  */
 
 import { SlackClient } from "../slack-client";
-import { getConversationType } from "../types/slack";
+import { getConversationType, getUserDisplayName } from "../types/slack";
+import { mpimParticipants } from "./find-conversation";
 
 interface ListConversationsOptions {
   types?: "all" | "channels" | "dms";
@@ -44,8 +45,13 @@ export async function listConversations(
     slackTypes = "public_channel,private_channel,mpim,im";
   }
 
+  // Warm the user directory (one cached users.list call) so DMs and group
+  // DMs show people's names instead of raw IDs / mpdm- strings
+  await client.ensureUserDirectory();
+
   const conversations = await client.listConversations({
     types: slackTypes,
+    maxPages: 0,
   });
 
   // Categorize conversations
@@ -60,9 +66,14 @@ export async function listConversations(
     if (conv.is_im && conv.user) {
       const cachedUser = client.getCachedUser(conv.user);
       if (cachedUser) {
-        displayName = `@${cachedUser.display_name || cachedUser.real_name || cachedUser.name}`;
+        displayName = `@${getUserDisplayName(cachedUser)}`;
       } else {
         displayName = `DM (${conv.user.substring(0, 8)}...)`;
+      }
+    } else if (conv.is_mpim) {
+      const participants = mpimParticipants(conv, client);
+      if (participants.length > 0) {
+        displayName = participants.join(", ");
       }
     }
 

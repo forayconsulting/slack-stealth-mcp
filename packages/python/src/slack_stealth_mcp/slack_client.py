@@ -1,6 +1,7 @@
 """Async Slack API client using xoxc/xoxd session tokens."""
 
 import asyncio
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +16,11 @@ from .types import (
 )
 
 SLACK_API_BASE = "https://slack.com/api"
+
+
+def normalize_name(name: str) -> str:
+    """Normalize a name for matching: lowercase, alphanumerics only."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
 class RateLimiter:
@@ -73,6 +79,8 @@ class SlackClient:
 
         # In-memory caches
         self._users_cache: Dict[str, SlackUser] = {}
+        self._user_name_index: Dict[str, SlackUser] = {}  # normalized name -> user
+        self._users_list_time: float = 0
         self._conversations_cache: Dict[str, SlackConversation] = {}
         self._last_read_cache: Dict[str, str] = {}  # channel_id -> last_read ts
         self._cache_time: float = 0
@@ -386,6 +394,9 @@ class SlackClient:
         payload: Dict[str, Any] = {
             "channel": channel,
             "text": text,
+            # Auto-link plain @handle/#channel (matches Slack handles, not
+            # display names); pre-formatted <@U...> tokens work regardless
+            "link_names": "true",
         }
         if thread_ts:
             payload["thread_ts"] = thread_ts
@@ -497,15 +508,9 @@ class SlackClient:
         data = await self._request("GET", "users.info", params={"user": user_id})
 
         user_data = data["user"]
-        user = SlackUser(
-            id=user_data["id"],
-            name=user_data.get("name", ""),
-            real_name=user_data.get("real_name"),
-            display_name=user_data.get("profile", {}).get("display_name"),
-            is_bot=user_data.get("is_bot", False),
-        )
+        user = self._parse_user(user_data)
 
-        self._users_cache[user_id] = user
+        self._cache_user(user)
         return user
 
     async def resolve_user_name(self, user_id: str) -> str:
@@ -545,6 +550,101 @@ class SlackClient:
             except Exception:
                 pass  # Silently ignore - will show truncated ID as fallback
 
+    async def list_users(self, limit: int = 200, max_pages: int = 0) -> List[SlackUser]:
+        """Fetch the workspace user directory via users.list.
+
+        Populates the ID cache and the name index used for name -> user lookup.
+
+        Args:
+            limit: Max results per page
+            max_pages: Maximum pages to fetch (0 = unlimited)
+
+        Returns:
+            List of active (non-deleted) users
+        """
+        users: List[SlackUser] = []
+        cursor: Optional[str] = None
+        pages_fetched = 0
+
+        while True:
+            params: Dict[str, Any] = {"limit": limit}
+            if cursor:
+                params["cursor"] = cursor
+
+            data = await self._request("GET", "users.list", params=params)
+            pages_fetched += 1
+
+            for member in data.get("members", []):
+                if member.get("deleted"):
+                    continue
+                user = self._parse_user(member)
+                users.append(user)
+                self._cache_user(user)
+
+            cursor = data.get("response_metadata", {}).get("next_cursor")
+            if not cursor or (max_pages > 0 and pages_fetched >= max_pages):
+                break
+
+        self._users_list_time = time.monotonic()
+        return users
+
+    async def ensure_user_directory(self, ttl: float = 3600.0) -> bool:
+        """Make sure the user directory has been fetched recently.
+
+        Args:
+            ttl: Seconds before the directory is considered stale
+
+        Returns:
+            True if the directory is available, False if the fetch failed
+        """
+        if self._users_list_time and time.monotonic() - self._users_list_time < ttl:
+            return True
+        try:
+            await self.list_users()
+            return True
+        except Exception:
+            # Directory is best-effort; ID-based lookups still work
+            return False
+
+    def get_user_by_name(self, name: str) -> Optional[SlackUser]:
+        """Look up a user by handle, real name, or display name (normalized)."""
+        return self._user_name_index.get(normalize_name(name))
+
+    def directory_users(self) -> List[SlackUser]:
+        """All users currently known to the cache."""
+        return list(self._users_cache.values())
+
+    # =========================================================================
+    # Client API (undocumented, used by Slack's own web client)
+    # =========================================================================
+
+    async def get_counts(self) -> Dict[str, Any]:
+        """Fetch authoritative unread badge state via client.counts.
+
+        This is the endpoint Slack's own client uses to render badges. It
+        returns has_unreads/mention_count/last_read/latest for every channel,
+        DM, and group DM, plus thread badge state, in one request. Works with
+        the same xoxc/xoxd session tokens as every other call here.
+
+        NOTE: Read-only - this does NOT mark anything as read.
+
+        Returns:
+            Raw client.counts response (treat all fields as optional -
+            the endpoint is undocumented and may drift)
+        """
+        return await self._request(
+            "POST",
+            "client.counts",
+            data={
+                # Some internal endpoints prefer the token in the body even
+                # though the Authorization header is set
+                "token": self._config.xoxc_token,
+                "thread_counts_by_channel": "true",
+                "org_wide_aware": "true",
+                "include_file_channels": "true",
+            },
+        )
+
     # =========================================================================
     # Auth API
     # =========================================================================
@@ -561,14 +661,40 @@ class SlackClient:
     # Helpers
     # =========================================================================
 
+    def _parse_user(self, data: Dict[str, Any]) -> SlackUser:
+        """Parse a user from API response."""
+        return SlackUser(
+            id=data["id"],
+            name=data.get("name", ""),
+            real_name=data.get("real_name"),
+            display_name=data.get("profile", {}).get("display_name"),
+            is_bot=data.get("is_bot", False),
+        )
+
+    def _cache_user(self, user: SlackUser) -> None:
+        """Cache a user by ID and index by all known names."""
+        self._users_cache[user.id] = user
+        for name in (user.name, user.real_name, user.display_name):
+            if name:
+                key = normalize_name(name)
+                if key:
+                    self._user_name_index[key] = user
+
     def _parse_message(self, data: Dict[str, Any]) -> SlackMessage:
         """Parse a message from API response."""
+        # search.messages returns channel as an object; history omits it;
+        # some endpoints return a bare channel ID string
+        channel = data.get("channel")
+        if isinstance(channel, str):
+            channel = {"id": channel}
+
         return SlackMessage(
             ts=data["ts"],
             text=data.get("text", ""),
             user=data.get("user"),
             thread_ts=data.get("thread_ts"),
             reply_count=data.get("reply_count"),
+            channel=channel,
             reactions=data.get("reactions", []),
             attachments=data.get("attachments", []),
             blocks=data.get("blocks", []),

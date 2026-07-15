@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..mrkdwn import normalize_mrkdwn
+from ..refs import resolve_channel_ref
 from ..slack_client import SlackAPIError
 from ..workspace import WorkspaceManager
 
@@ -27,6 +29,7 @@ async def reply(
             - DM channel ID (D...)
             - User ID (U...) - will open/get DM
             - Group DM ID (G...)
+            - Slack URL (copied via "Copy link")
         message: Message text (supports Slack mrkdwn formatting)
         thread_ts: Parent message timestamp for thread reply
         broadcast: For thread replies, also post to channel
@@ -37,18 +40,29 @@ async def reply(
     """
     client = manager.get_client(workspace)
 
-    # Determine channel ID
-    channel_id = target
+    # Resolve URLs/raw IDs to a channel ID
+    try:
+        ref = resolve_channel_ref(target)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+
+    channel_id = ref.channel_id
+    # A message URL implies a thread reply unless the caller said otherwise
+    if ref.message_ts and not thread_ts:
+        thread_ts = ref.message_ts
 
     # If target is a user ID, open/get DM channel
-    if target.startswith("U"):
+    if channel_id.startswith(("U", "W")):
         try:
-            channel_id = await client.open_conversation([target])
+            channel_id = await client.open_conversation([channel_id])
         except SlackAPIError as e:
             return {
                 "ok": False,
-                "error": f"Failed to open DM with user {target}: {e.error}",
+                "error": f"Failed to open DM with user {channel_id}: {e.error}",
             }
+
+    # Convert any stray Markdown to Slack mrkdwn
+    message = normalize_mrkdwn(message)
 
     # Send the message
     try:

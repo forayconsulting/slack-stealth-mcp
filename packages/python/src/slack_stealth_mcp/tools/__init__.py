@@ -1,6 +1,7 @@
 """MCP tools for Slack operations."""
 
 from .auth import auth_login, auth_status
+from .find_conversation import find_conversation
 from .get_context import get_context
 from .get_unread import get_unread
 from .list_conversations import list_conversations
@@ -12,6 +13,7 @@ from .search import search
 __all__ = [
     "auth_login",
     "auth_status",
+    "find_conversation",
     "get_context",
     "get_unread",
     "list_conversations",

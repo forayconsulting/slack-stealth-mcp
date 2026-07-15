@@ -3,6 +3,8 @@
  */
 
 import { SlackClient, SlackAPIError } from "../slack-client";
+import { normalizeMrkdwn } from "../mrkdwn";
+import { resolveChannelRef } from "../refs";
 
 interface ReplyOptions {
   target: string;
@@ -31,30 +33,48 @@ export async function reply(
   client: SlackClient,
   options: ReplyOptions
 ): Promise<ReplyResult> {
-  const { target, message, threadTs, broadcast = false } = options;
+  const { target, message, broadcast = false } = options;
+  let { threadTs } = options;
 
-  // Determine channel ID
-  let channelId = target;
+  // Resolve URLs/raw IDs to a channel ID
+  let channelId: string;
+  try {
+    const ref = resolveChannelRef(target);
+    channelId = ref.channelId;
+    // A message URL implies a thread reply unless the caller said otherwise
+    if (ref.messageTs && !threadTs) {
+      threadTs = ref.messageTs;
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 
   // If target is a user ID, open/get DM channel
-  if (target.startsWith("U")) {
+  if (channelId.startsWith("U") || channelId.startsWith("W")) {
     try {
-      channelId = await client.openConversation([target]);
+      channelId = await client.openConversation([channelId]);
     } catch (error) {
       const apiError = error as SlackAPIError;
       return {
         ok: false,
-        error: `Failed to open DM with user ${target}: ${apiError.error || apiError.message}`,
+        error: `Failed to open DM with user ${channelId}: ${apiError.error || apiError.message}`,
       };
     }
   }
 
   // Send the message
   try {
-    const sentMessage = await client.postMessage(channelId, message, {
-      threadTs,
-      replyBroadcast: broadcast,
-    });
+    const sentMessage = await client.postMessage(
+      channelId,
+      normalizeMrkdwn(message),
+      {
+        threadTs,
+        replyBroadcast: broadcast,
+      }
+    );
 
     const result: ReplyResult = {
       ok: true,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..workspace import WorkspaceManager
+from .find_conversation import _mpim_participants
 
 
 async def list_conversations(
@@ -32,7 +33,11 @@ async def list_conversations(
     else:
         slack_types = "public_channel,private_channel,mpim,im"
 
-    conversations = await client.list_conversations(types=slack_types)
+    # Warm the user directory (one cached users.list call) so DMs and group
+    # DMs show people's names instead of raw IDs / mpdm- strings
+    await client.ensure_user_directory()
+
+    conversations = await client.list_conversations(types=slack_types, max_pages=0)
 
     # Categorize conversations
     channels = []
@@ -41,16 +46,17 @@ async def list_conversations(
     group_dms = []
 
     for conv in conversations:
-        # Use display_name directly - user resolution is done lazily when needed
-        # This avoids N+1 API calls for DMs
         display_name = conv.display_name
         if conv.is_im and conv.user:
-            # Try cache first, don't make API call just for listing
             cached_user = client._users_cache.get(conv.user)
             if cached_user:
                 display_name = f"@{cached_user.display}"
             else:
                 display_name = f"DM ({conv.user[:8]}...)"
+        elif conv.is_mpim:
+            participants = _mpim_participants(conv, client)
+            if participants:
+                display_name = ", ".join(participants)
 
         entry = {
             "id": conv.id,

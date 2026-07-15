@@ -23,6 +23,13 @@ import type {
 const SLACK_API_BASE = "https://slack.com/api";
 
 /**
+ * Normalize a name for matching: lowercase, alphanumerics only
+ */
+export function normalizeName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/**
  * Slack API Error
  */
 export class SlackAPIError extends Error {
@@ -54,6 +61,8 @@ export class SlackClient {
 
   // In-memory caches
   private usersCache: Map<string, SlackUser> = new Map();
+  private userNameIndex: Map<string, SlackUser> = new Map(); // normalized name -> user
+  private usersListTime: number = 0;
   private conversationsCache: Map<string, SlackConversation> = new Map();
   private lastReadCache: Map<string, string> = new Map();
   private cacheTime: number = 0;
@@ -320,6 +329,9 @@ export class SlackClient {
     const data: Record<string, string | number | boolean> = {
       channel,
       text,
+      // Auto-link plain @handle/#channel (matches Slack handles, not
+      // display names); pre-formatted <@U...> tokens work regardless
+      link_names: true,
     };
 
     if (options.threadTs) {
@@ -428,26 +440,13 @@ export class SlackClient {
     if (cached) return cached;
 
     const data = await this.request<{
-      user: {
-        id: string;
-        name: string;
-        real_name?: string;
-        is_bot?: boolean;
-        profile?: { display_name?: string };
-      };
+      user: Record<string, unknown>;
     }>("GET", "users.info", {
       params: { user: userId },
     });
 
-    const user: SlackUser = {
-      id: data.user.id,
-      name: data.user.name || "",
-      real_name: data.user.real_name,
-      display_name: data.user.profile?.display_name,
-      is_bot: data.user.is_bot || false,
-    };
-
-    this.usersCache.set(userId, user);
+    const user = this.parseUser(data.user);
+    this.cacheUser(user);
     return user;
   }
 
@@ -483,6 +482,110 @@ export class SlackClient {
         // Silently ignore - will show ID as fallback
       }
     }
+  }
+
+  /**
+   * Fetch the workspace user directory via users.list.
+   * Populates the ID cache and the name index used for name -> user lookup.
+   *
+   * @param limit Max results per page
+   * @param maxPages Maximum pages to fetch (0 = unlimited)
+   */
+  async listUsers(limit: number = 200, maxPages: number = 0): Promise<SlackUser[]> {
+    const users: SlackUser[] = [];
+    let cursor: string | undefined;
+    let pagesFetched = 0;
+
+    while (true) {
+      const params: Record<string, string | number | boolean> = { limit };
+      if (cursor) {
+        params.cursor = cursor;
+      }
+
+      const data = await this.request<{
+        members: Array<Record<string, unknown>>;
+        response_metadata?: { next_cursor?: string };
+      }>("GET", "users.list", { params });
+
+      pagesFetched++;
+
+      for (const member of data.members || []) {
+        if (member.deleted) continue;
+        const user = this.parseUser(member);
+        users.push(user);
+        this.cacheUser(user);
+      }
+
+      cursor = data.response_metadata?.next_cursor;
+      if (!cursor || (maxPages > 0 && pagesFetched >= maxPages)) {
+        break;
+      }
+    }
+
+    this.usersListTime = Date.now();
+    return users;
+  }
+
+  /**
+   * Make sure the user directory has been fetched recently.
+   *
+   * @param ttlMs Milliseconds before the directory is considered stale
+   * @returns true if the directory is available, false if the fetch failed
+   */
+  async ensureUserDirectory(ttlMs: number = 3600_000): Promise<boolean> {
+    if (this.usersListTime && Date.now() - this.usersListTime < ttlMs) {
+      return true;
+    }
+    try {
+      await this.listUsers();
+      return true;
+    } catch {
+      // Directory is best-effort; ID-based lookups still work
+      return false;
+    }
+  }
+
+  /**
+   * Look up a user by handle, real name, or display name (normalized)
+   */
+  getUserByName(name: string): SlackUser | undefined {
+    return this.userNameIndex.get(normalizeName(name));
+  }
+
+  /**
+   * All users currently known to the cache
+   */
+  directoryUsers(): SlackUser[] {
+    return Array.from(this.usersCache.values());
+  }
+
+  // =========================================================================
+  // Client API (undocumented, used by Slack's own web client)
+  // =========================================================================
+
+  /**
+   * Fetch authoritative unread badge state via client.counts.
+   *
+   * This is the endpoint Slack's own client uses to render badges. It
+   * returns has_unreads/mention_count/last_read/latest for every channel,
+   * DM, and group DM, plus thread badge state, in one request.
+   *
+   * NOTE: Read-only - this does NOT mark anything as read.
+   *
+   * @returns Raw client.counts response (treat all fields as optional -
+   *          the endpoint is undocumented and may drift)
+   */
+  async getCounts(): Promise<Record<string, unknown>> {
+    return this.request("POST", "client.counts", {
+      data: {
+        // Some internal endpoints prefer the token in the body even
+        // though the Authorization header is set
+        token: this.xoxcToken,
+        thread_counts_by_channel: true,
+        org_wide_aware: true,
+        include_file_channels: true,
+      },
+    });
   }
 
   // =========================================================================
@@ -533,6 +636,8 @@ export class SlackClient {
    */
   clearCaches(): void {
     this.usersCache.clear();
+    this.userNameIndex.clear();
+    this.usersListTime = 0;
     this.conversationsCache.clear();
     this.lastReadCache.clear();
     this.cacheTime = 0;
@@ -541,6 +646,29 @@ export class SlackClient {
   // =========================================================================
   // Parsing Helpers
   // =========================================================================
+
+  private parseUser(data: Record<string, unknown>): SlackUser {
+    const profile = data.profile as { display_name?: string } | undefined;
+    return {
+      id: data.id as string,
+      name: (data.name as string) || "",
+      real_name: data.real_name as string | undefined,
+      display_name: profile?.display_name,
+      is_bot: (data.is_bot as boolean) || false,
+    };
+  }
+
+  private cacheUser(user: SlackUser): void {
+    this.usersCache.set(user.id, user);
+    for (const name of [user.name, user.real_name, user.display_name]) {
+      if (name) {
+        const key = normalizeName(name);
+        if (key) {
+          this.userNameIndex.set(key, user);
+        }
+      }
+    }
+  }
 
   private parseConversation(data: Record<string, unknown>): SlackConversation {
     return {

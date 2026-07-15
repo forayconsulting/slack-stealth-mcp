@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..refs import resolve_channel_ref
 from ..slack_client import SlackAPIError
 from ..workspace import WorkspaceManager
 
@@ -20,7 +21,7 @@ async def react(
 
     Args:
         manager: Workspace manager
-        channel: Channel ID containing the message
+        channel: Channel ID (or Slack URL) containing the message
         message_ts: Timestamp of the message to react to
         emoji: Emoji name without colons (e.g., "thumbsup", not ":thumbsup:")
         remove: If True, remove the reaction instead of adding
@@ -30,6 +31,12 @@ async def react(
         Dictionary with reaction details
     """
     client = manager.get_client(workspace)
+
+    try:
+        ref = resolve_channel_ref(channel)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    channel = ref.channel_id
 
     # Normalize emoji name - strip colons if provided
     emoji_name = emoji.strip(":")

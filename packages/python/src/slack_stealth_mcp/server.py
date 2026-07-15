@@ -14,6 +14,7 @@ from .config import load_config
 from .tools import (
     auth_login,
     auth_status,
+    find_conversation,
     get_context,
     get_unread,
     list_conversations,
@@ -24,8 +25,33 @@ from .tools import (
 )
 from .workspace import WorkspaceManager
 
+# Standing guidance delivered to MCP clients at initialization.
+# Not all clients surface this to the model, so the slack_reply tool
+# description repeats the composition rules.
+SERVER_INSTRUCTIONS = """\
+Slack Stealth MCP: read Slack without triggering read receipts; only
+slack_mark_read changes read state.
+
+When composing any Slack message, always write Slack mrkdwn, NOT standard
+Markdown:
+- *bold* (single asterisks), _italic_, ~strikethrough~, `code`, ```code blocks```
+- > for quotes; use - or • for bullet lists
+- Never use ## headers - use a *bold* line instead
+- Links: <https://example.com|link text>, never [text](url)
+
+Mentions:
+- Mention people as <@USERID> instead of writing their plain name whenever
+  they are in the conversation. Use slack_find_conversation to look up a
+  person's user ID by name.
+- When addressing the whole group, open with <!here> (pings active members)
+  or <!channel> (pings everyone). Use <!here> by default.
+- Reference channels as <#C01234567>.
+
+Channels and DMs can be referenced by ID, by pasted Slack URL, or found by
+name/person with slack_find_conversation."""
+
 # Initialize MCP server
-server = Server("slack-stealth-mcp")
+server = Server("slack-stealth-mcp", instructions=SERVER_INSTRUCTIONS)
 
 # Global workspace manager (initialized on startup)
 _manager: WorkspaceManager | None = None
@@ -103,7 +129,12 @@ After this returns successfully, proceed with the original Slack request.""",
         description="""Get all unread messages and mentions across your Slack workspace.
 
 This is the "What's new?" tool - perfect for catching up on activity.
-Returns unread DMs, channel messages with new activity, and recent mentions.
+Returns unread DMs, channel messages with new activity, recent mentions,
+and a summary of unread thread replies. Uses Slack's own badge state, so
+it matches what the Slack app shows as unread.
+
+If the result contains a "truncated" section, more unread conversations
+exist - call again with a higher max_conversations to see them.
 
 IMPORTANT: This does NOT mark any messages as read. Your read state is preserved.
 
@@ -131,6 +162,31 @@ slack_auth_login to set up authentication automatically.""",
                     "description": "Include recent mentions (default: true)",
                     "default": True,
                 },
+                "include_threads": {
+                    "type": "boolean",
+                    "description": "Include unread thread reply summary (default: true)",
+                    "default": True,
+                },
+                "max_conversations": {
+                    "type": "integer",
+                    "description": "Max conversations to fetch message previews for (default: 20)",
+                    "default": 20,
+                },
+                "max_messages_per_conversation": {
+                    "type": "integer",
+                    "description": "Max unread messages to show per conversation (default: 5)",
+                    "default": 5,
+                },
+                "max_dms": {
+                    "type": "integer",
+                    "description": "Cap on unread DMs considered (default: 30)",
+                    "default": 30,
+                },
+                "max_channels": {
+                    "type": "integer",
+                    "description": "Cap on unread channels considered (default: 50)",
+                    "default": 50,
+                },
             },
         },
     ),
@@ -139,14 +195,20 @@ slack_auth_login to set up authentication automatically.""",
         description="""Send a message or reply in Slack.
 
 Can send to:
-- Channels (use channel ID like C01234567)
-- DMs (use user ID like U01234567 - will open DM if needed)
+- Channels (channel ID like C01234567, or a pasted Slack URL)
+- DMs (user ID like U01234567 - will open DM if needed)
 - Threads (provide thread_ts to reply in thread)
 
-Supports Slack mrkdwn formatting:
-- *bold*, _italic_, ~strikethrough~
-- <@U01234567> for user mentions
-- <#C01234567> for channel links
+ALWAYS write Slack mrkdwn, NOT standard Markdown:
+- *bold* with SINGLE asterisks, _italic_, ~strikethrough~, > quotes, - bullets
+- Links as <https://example.com|link text>
+- Do NOT use **double asterisks**, ## headers, or [text](url) links
+  (common mistakes are auto-corrected, but write native mrkdwn)
+
+ALWAYS mention people as <@USERID> instead of writing their plain name when
+they are in the conversation (use slack_find_conversation to get user IDs).
+When addressing the whole group, open with <!here> (active members) or
+<!channel> (everyone).
 
 IMPORTANT: This does NOT mark the channel as read.""",
         inputSchema={
@@ -154,11 +216,11 @@ IMPORTANT: This does NOT mark the channel as read.""",
             "properties": {
                 "target": {
                     "type": "string",
-                    "description": "Channel ID (C...), User ID (U...), or DM ID (D...)",
+                    "description": "Channel ID (C...), User ID (U...), DM ID (D...), or Slack URL",
                 },
                 "message": {
                     "type": "string",
-                    "description": "Message text (supports Slack mrkdwn)",
+                    "description": "Message text in Slack mrkdwn (*bold*, <@USERID> mentions, <!here>)",
                 },
                 "thread_ts": {
                     "type": "string",
@@ -239,6 +301,46 @@ This does NOT mark messages as read.""",
         },
     ),
     Tool(
+        name="slack_find_conversation",
+        description="""Find Slack channels, DMs, group DMs, and people by name.
+
+Use this whenever the user refers to a conversation by name instead of ID:
+"the design channel", "my DM with Alice", "the group chat with Bob and Carol".
+Returns ranked matches with IDs that other tools (slack_reply,
+slack_get_context, slack_react) accept directly.
+
+Also use it to look up a person's user ID for <@USERID> mentions in messages.
+
+Matches people even if you have no DM with them yet - reply with
+target=<user_id> to start one.
+
+IMPORTANT: This does NOT mark anything as read.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Name to find: channel name, person's name, or Slack handle",
+                },
+                "include_users": {
+                    "type": "boolean",
+                    "description": "Also match workspace users without an existing DM (default: true)",
+                    "default": True,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max matches to return (default: 15)",
+                    "default": 15,
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace name (uses default if not specified)",
+                },
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
         name="slack_get_context",
         description="""Get messages from a conversation for context.
 
@@ -252,7 +354,7 @@ IMPORTANT: This does NOT mark messages as read.""",
             "properties": {
                 "channel": {
                     "type": "string",
-                    "description": "Channel ID (C..., D..., or G...)",
+                    "description": "Channel ID (C..., D..., or G...) or Slack URL",
                 },
                 "message_ts": {
                     "type": "string",
@@ -306,7 +408,7 @@ If no timestamp is provided, marks all messages in the conversation as read.""",
             "properties": {
                 "channel": {
                     "type": "string",
-                    "description": "Channel ID to mark as read",
+                    "description": "Channel ID (or Slack URL) to mark as read",
                 },
                 "timestamp": {
                     "type": "string",
@@ -337,7 +439,7 @@ IMPORTANT: This does NOT mark messages as read.""",
             "properties": {
                 "channel": {
                     "type": "string",
-                    "description": "Channel ID containing the message",
+                    "description": "Channel ID (or Slack URL) containing the message",
                 },
                 "message_ts": {
                     "type": "string",
@@ -396,6 +498,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 include_channels=arguments.get("include_channels", True),
                 include_dms=arguments.get("include_dms", True),
                 include_mentions=arguments.get("include_mentions", True),
+                include_threads=arguments.get("include_threads", True),
+                max_conversations_to_check=arguments.get("max_conversations", 20),
+                max_messages_per_conversation=arguments.get(
+                    "max_messages_per_conversation", 5
+                ),
+                max_dms_to_scan=arguments.get("max_dms", 30),
+                max_channels_to_scan=arguments.get("max_channels", 50),
             )
 
         elif name == "slack_reply":
@@ -420,6 +529,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 has_reaction=arguments.get("has_reaction", False),
                 is_thread=arguments.get("is_thread", False),
                 limit=arguments.get("limit", 20),
+                workspace=arguments.get("workspace"),
+            )
+
+        elif name == "slack_find_conversation":
+            result = await find_conversation(
+                manager=manager,
+                query=arguments["query"],
+                include_users=arguments.get("include_users", True),
+                limit=arguments.get("limit", 15),
                 workspace=arguments.get("workspace"),
             )
 

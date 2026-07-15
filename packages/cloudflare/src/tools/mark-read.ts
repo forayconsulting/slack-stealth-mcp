@@ -5,6 +5,7 @@
  */
 
 import { SlackClient, SlackAPIError } from "../slack-client";
+import { resolveChannelRef } from "../refs";
 
 interface MarkReadOptions {
   channel: string;
@@ -28,8 +29,14 @@ export async function markRead(
   client: SlackClient,
   options: MarkReadOptions
 ): Promise<MarkReadResult> {
-  const { channel } = options;
   let { timestamp } = options;
+
+  // Resolve URLs/raw IDs; a message URL supplies timestamp when not given
+  const ref = resolveChannelRef(options.channel);
+  const channel = ref.channelId;
+  if (ref.messageTs && !timestamp) {
+    timestamp = ref.messageTs;
+  }
 
   // If no timestamp provided, get the latest message
   if (!timestamp) {

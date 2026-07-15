@@ -4,6 +4,7 @@
 
 import { SlackClient } from "../slack-client";
 import { tsToDate, getConversationType } from "../types/slack";
+import { resolveChannelRef } from "../refs";
 
 interface GetContextOptions {
   channel: string;
@@ -40,7 +41,15 @@ export async function getContext(
   client: SlackClient,
   options: GetContextOptions
 ): Promise<GetContextResult> {
-  const { channel, messageTs, contextSize = 10 } = options;
+  const { contextSize = 10 } = options;
+  let { messageTs } = options;
+
+  // Resolve URLs/raw IDs; a message URL supplies messageTs when not given
+  const ref = resolveChannelRef(options.channel);
+  const channel = ref.channelId;
+  if (ref.messageTs && !messageTs) {
+    messageTs = ref.messageTs;
+  }
 
   // Check if this is a thread request
   let isThread = false;

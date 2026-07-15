@@ -3,6 +3,7 @@
  */
 
 import { SlackClient, SlackAPIError } from "../slack-client";
+import { resolveChannelRef } from "../refs";
 
 interface ReactOptions {
   channel: string;
@@ -29,7 +30,9 @@ export async function react(
   client: SlackClient,
   options: ReactOptions
 ): Promise<ReactResult> {
-  const { channel, messageTs, emoji, remove = false } = options;
+  const { messageTs, emoji, remove = false } = options;
+
+  const channel = resolveChannelRef(options.channel).channelId;
 
   // Normalize emoji name - strip colons if provided
   const emojiName = emoji.replace(/^:|:$/g, "");

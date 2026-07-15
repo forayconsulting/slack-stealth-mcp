@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..refs import resolve_channel_ref
 from ..slack_client import SlackAPIError
 from ..workspace import WorkspaceManager
 
@@ -21,7 +22,7 @@ async def mark_read(
 
     Args:
         manager: Workspace manager
-        channel: Channel ID to mark as read
+        channel: Channel ID (or Slack URL) to mark as read
         timestamp: Mark as read up to this message timestamp.
                    If not provided, marks all messages as read.
         workspace: Workspace name (uses default if not specified)
@@ -30,6 +31,14 @@ async def mark_read(
         Dictionary with result status
     """
     client = manager.get_client(workspace)
+
+    try:
+        ref = resolve_channel_ref(channel)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    channel = ref.channel_id
+    if ref.message_ts and not timestamp:
+        timestamp = ref.message_ts
 
     # If no timestamp provided, get the latest message
     if not timestamp:

@@ -221,13 +221,16 @@ export SLACK_XOXD_COOKIE="xoxd-..."
 
 | Tool | Description |
 |------|-------------|
-| `slack_get_unread` | Get unread messages across ALL workspaces—perfect for "What's new in Slack?" |
-| `slack_reply` | Send messages to channels, DMs, or threads |
+| `slack_get_unread` | Get unread messages across ALL workspaces—perfect for "What's new in Slack?" Uses Slack's own badge state, so it matches what the app shows (including unread threads). |
+| `slack_find_conversation` | Find channels, DMs, group DMs, and people by name—turns "the design channel" or "my DM with Alice" into an ID the other tools accept. |
+| `slack_reply` | Send messages to channels, DMs, or threads. Accepts pasted Slack URLs, and always writes correct Slack formatting (mrkdwn, `<@USERID>` mentions, `<!here>`). |
 | `slack_react` | Add/remove emoji reactions to messages |
 | `slack_search` | Search with full Slack syntax (`in:`, `from:`, `has:`, date ranges) |
-| `slack_get_context` | Get conversation history for context |
+| `slack_get_context` | Get conversation history for context (accepts a channel ID or a pasted Slack URL) |
 | `slack_list_conversations` | List all channels and DMs you have access to |
 | `slack_mark_read` | Explicitly mark conversations as read |
+
+> **Referring to conversations by name or URL:** Every tool that takes a `channel`/`target` also accepts a Slack link copied via "Copy link." To find something by name (a channel, a person, or the people in a group DM), use `slack_find_conversation` first—it returns ranked matches with IDs.
 
 ### Authentication Tools (varies by deployment)
 
@@ -244,6 +247,12 @@ export SLACK_XOXD_COOKIE="xoxd-..."
 ```
 "What's new in Slack?"
 → Uses slack_get_unread to fetch unread messages across all workspaces
+
+"Find the design-team channel"
+→ Uses slack_find_conversation to resolve the name to a channel ID
+
+"Message my DM with Alice and let her know I'm running late"
+→ Uses slack_find_conversation to find the DM, then slack_reply
 
 "Search for messages about the Q4 roadmap"
 → Uses slack_search with query "Q4 roadmap"
@@ -273,6 +282,7 @@ One of the key benefits of Slack Stealth MCP is **silent reading**:
 | Operation | Marks as Read? | Shows Typing? |
 |-----------|:--------------:|:-------------:|
 | `slack_get_unread` | No | No |
+| `slack_find_conversation` | No | No |
 | `slack_search` | No | No |
 | `slack_get_context` | No | No |
 | `slack_reply` | No | No |
@@ -280,7 +290,7 @@ One of the key benefits of Slack Stealth MCP is **silent reading**:
 | `slack_list_conversations` | No | No |
 | `slack_mark_read` | **Yes** | No |
 
-Only the explicit `slack_mark_read` tool affects your read state. Everything else is completely silent—your colleagues won't know Claude is helping you catch up on messages.
+Only the explicit `slack_mark_read` tool affects your read state. Everything else is completely silent—your colleagues won't know Claude is helping you catch up on messages. `slack_get_unread` reads Slack's badge state via the same `client.counts` endpoint the Slack web client uses on every load, which is read-only and never marks anything read.
 
 </details>
 

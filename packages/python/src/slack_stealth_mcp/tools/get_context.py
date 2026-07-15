@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..refs import resolve_channel_ref
 from ..workspace import WorkspaceManager
 
 
@@ -20,7 +21,7 @@ async def get_context(
 
     Args:
         manager: Workspace manager
-        channel: Channel ID (C..., D..., G...)
+        channel: Channel ID (C..., D..., G...) or Slack URL
         message_ts: Optional message timestamp to get context around
         context_size: Number of messages to fetch (default 10)
         workspace: Workspace name (uses default if not specified)
@@ -29,6 +30,15 @@ async def get_context(
         Dictionary with messages and conversation info
     """
     client = manager.get_client(workspace)
+
+    # Resolve URLs/raw IDs; a message URL supplies message_ts when not given
+    try:
+        ref = resolve_channel_ref(channel)
+    except ValueError as e:
+        return {"error": str(e)}
+    channel = ref.channel_id
+    if ref.message_ts and not message_ts:
+        message_ts = ref.message_ts
 
     # Check if this is a thread request (message_ts points to a thread parent)
     is_thread = False

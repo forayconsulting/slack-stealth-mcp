@@ -18,6 +18,7 @@ import { getUnread } from "../tools/get-unread";
 import { reply } from "../tools/reply";
 import { search } from "../tools/search";
 import { getContext } from "../tools/get-context";
+import { findConversation } from "../tools/find-conversation";
 import { listConversations } from "../tools/list-conversations";
 import { markRead } from "../tools/mark-read";
 import { react } from "../tools/react";
@@ -38,6 +39,31 @@ interface McpProps extends Record<string, unknown> {
   authenticatedAt?: string;
 }
 
+// Standing guidance delivered to MCP clients at initialization.
+// Not all clients surface this to the model, so the slack_reply tool
+// description repeats the composition rules.
+const SERVER_INSTRUCTIONS = `\
+Slack Stealth MCP: read Slack without triggering read receipts; only
+slack_mark_read changes read state.
+
+When composing any Slack message, always write Slack mrkdwn, NOT standard
+Markdown:
+- *bold* (single asterisks), _italic_, ~strikethrough~, \`code\`, \`\`\`code blocks\`\`\`
+- > for quotes; use - or • for bullet lists
+- Never use ## headers - use a *bold* line instead
+- Links: <https://example.com|link text>, never [text](url)
+
+Mentions:
+- Mention people as <@USERID> instead of writing their plain name whenever
+  they are in the conversation. Use slack_find_conversation to look up a
+  person's user ID by name.
+- When addressing the whole group, open with <!here> (pings active members)
+  or <!channel> (pings everyone). Use <!here> by default.
+- Reference channels as <#C01234567>.
+
+Channels and DMs can be referenced by ID, by pasted Slack URL, or found by
+name/person with slack_find_conversation.`;
+
 /**
  * Slack Stealth MCP Server - Durable Object
  *
@@ -45,16 +71,26 @@ interface McpProps extends Record<string, unknown> {
  * Slack tokens are received via this.props.slackTokens.
  */
 export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
-  server = new McpServer({
-    name: "slack-stealth-mcp",
-    version: "1.0.0",
-  });
+  server = new McpServer(
+    {
+      name: "slack-stealth-mcp",
+      version: "1.0.0",
+    },
+    {
+      instructions: SERVER_INSTRUCTIONS,
+    }
+  );
 
   initialState: McpState = {};
+
+  private _client?: SlackClient;
 
   /**
    * Get a SlackClient using tokens from OAuth props
    * This will throw if called without authentication (shouldn't happen - OAuth handles it)
+   *
+   * The client is memoized on the Durable Object so its in-memory caches
+   * (users, conversations) survive across tool calls in a session.
    */
   private getClient(): SlackClient {
     if (!this.props.slackTokens) {
@@ -62,7 +98,10 @@ export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
         "Not authenticated. Slack tokens not found in OAuth props."
       );
     }
-    return new SlackClient(this.props.slackTokens);
+    if (!this._client) {
+      this._client = new SlackClient(this.props.slackTokens);
+    }
+    return this._client;
   }
 
   /**
@@ -76,7 +115,11 @@ export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
       "slack_get_unread",
       "Get all unread messages and mentions across your Slack workspace. " +
         "This is the 'What's new?' tool - perfect for catching up on activity. " +
-        "Returns unread DMs, channel messages with new activity, and recent mentions. " +
+        "Returns unread DMs, channel messages with new activity, recent mentions, " +
+        "and a summary of unread thread replies. Uses Slack's own badge state, " +
+        "so it matches what the Slack app shows as unread. " +
+        "If the result contains a 'truncated' section, more unread conversations " +
+        "exist - call again with a higher max_conversations. " +
         "IMPORTANT: This does NOT mark any messages as read.",
       {
         include_channels: z
@@ -91,6 +134,26 @@ export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
           .boolean()
           .default(true)
           .describe("Include recent mentions"),
+        include_threads: z
+          .boolean()
+          .default(true)
+          .describe("Include unread thread reply summary"),
+        max_conversations: z
+          .number()
+          .default(20)
+          .describe("Max conversations to fetch message previews for"),
+        max_messages_per_conversation: z
+          .number()
+          .default(5)
+          .describe("Max unread messages to show per conversation"),
+        max_dms: z
+          .number()
+          .default(30)
+          .describe("Cap on unread DMs considered"),
+        max_channels: z
+          .number()
+          .default(50)
+          .describe("Cap on unread channels considered"),
       },
       async (args) => {
         const client = this.getClient();
@@ -98,6 +161,11 @@ export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
           includeChannels: args.include_channels,
           includeDms: args.include_dms,
           includeMentions: args.include_mentions,
+          includeThreads: args.include_threads,
+          maxConversationsToCheck: args.max_conversations,
+          maxMessagesPerConversation: args.max_messages_per_conversation,
+          maxDmsToScan: args.max_dms,
+          maxChannelsToScan: args.max_channels,
         });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -111,16 +179,21 @@ export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
     this.server.tool(
       "slack_reply",
       "Send a message or reply in Slack. " +
-        "Can send to channels (C...), DMs (D...), or users (U... - will open DM). " +
-        "Supports Slack mrkdwn: *bold*, _italic_, ~strikethrough~, <@U...> mentions. " +
+        "Can send to channels (C... or a pasted Slack URL), DMs (D...), or users (U... - will open DM). " +
+        "ALWAYS write Slack mrkdwn, NOT standard Markdown: *bold* with SINGLE asterisks, " +
+        "_italic_, ~strikethrough~, > quotes, - bullets, links as <https://example.com|text>. " +
+        "Do NOT use **double asterisks**, ## headers, or [text](url) links. " +
+        "ALWAYS mention people as <@USERID> instead of plain names when they are in the " +
+        "conversation (use slack_find_conversation to get user IDs). When addressing the " +
+        "whole group, open with <!here> (active members) or <!channel> (everyone). " +
         "IMPORTANT: This does NOT mark the channel as read.",
       {
         target: z
           .string()
-          .describe("Channel ID (C...), User ID (U...), or DM ID (D...)"),
+          .describe("Channel ID (C...), User ID (U...), DM ID (D...), or Slack URL"),
         message: z
           .string()
-          .describe("Message text (supports Slack mrkdwn)"),
+          .describe("Message text in Slack mrkdwn (*bold*, <@USERID> mentions, <!here>)"),
         thread_ts: z
           .string()
           .optional()
@@ -219,7 +292,7 @@ export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
       {
         channel: z
           .string()
-          .describe("Channel ID (C..., D..., or G...)"),
+          .describe("Channel ID (C..., D..., or G...) or Slack URL"),
         message_ts: z
           .string()
           .optional()
@@ -235,6 +308,44 @@ export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
           channel: args.channel,
           messageTs: args.message_ts,
           contextSize: args.context_size,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+    );
+
+    // =========================================================================
+    // slack_find_conversation - Find channels, DMs, and people by name
+    // =========================================================================
+    this.server.tool(
+      "slack_find_conversation",
+      "Find Slack channels, DMs, group DMs, and people by name. " +
+        "Use this whenever the user refers to a conversation by name instead of ID: " +
+        "'the design channel', 'my DM with Alice', 'the group chat with Bob and Carol'. " +
+        "Returns ranked matches with IDs that other tools accept directly. " +
+        "Also use it to look up a person's user ID for <@USERID> mentions. " +
+        "Matches people even with no existing DM - reply with target=<user_id> to start one. " +
+        "IMPORTANT: This does NOT mark anything as read.",
+      {
+        query: z
+          .string()
+          .describe("Name to find: channel name, person's name, or Slack handle"),
+        include_users: z
+          .boolean()
+          .default(true)
+          .describe("Also match workspace users without an existing DM"),
+        limit: z
+          .number()
+          .default(15)
+          .describe("Max matches to return"),
+      },
+      async (args) => {
+        const client = this.getClient();
+        const result = await findConversation(client, {
+          query: args.query,
+          includeUsers: args.include_users,
+          limit: args.limit,
         });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -276,7 +387,7 @@ export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
         "Use it when you deliberately want to mark messages as read. " +
         "If no timestamp is provided, marks all messages as read.",
       {
-        channel: z.string().describe("Channel ID to mark as read"),
+        channel: z.string().describe("Channel ID (or Slack URL) to mark as read"),
         timestamp: z
           .string()
           .optional()
@@ -307,7 +418,7 @@ export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
       {
         channel: z
           .string()
-          .describe("Channel ID containing the message"),
+          .describe("Channel ID (or Slack URL) containing the message"),
         message_ts: z
           .string()
           .describe("Timestamp of the message to react to"),

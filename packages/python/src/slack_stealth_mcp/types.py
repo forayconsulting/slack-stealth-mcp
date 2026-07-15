@@ -30,9 +30,17 @@ class SlackMessage(BaseModel):
     user_name: Optional[str] = None  # Resolved user name
     thread_ts: Optional[str] = None
     reply_count: Optional[int] = None
+    channel: Optional[Dict[str, Any]] = None  # {id, name?} - present on search results
     reactions: List[Dict[str, Any]] = Field(default_factory=list)
     attachments: List[Dict[str, Any]] = Field(default_factory=list)
     blocks: List[Dict[str, Any]] = Field(default_factory=list)
+
+    @property
+    def channel_id(self) -> Optional[str]:
+        """Channel ID this message belongs to, if known."""
+        if self.channel:
+            return self.channel.get("id")
+        return None
 
     @property
     def is_thread_parent(self) -> bool:
