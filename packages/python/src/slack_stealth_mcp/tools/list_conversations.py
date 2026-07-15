@@ -25,19 +25,16 @@ async def list_conversations(
     """
     client = manager.get_client(workspace)
 
-    # Map type filter to Slack API types
-    if types == "channels":
-        slack_types = "public_channel,private_channel"
-    elif types == "dms":
-        slack_types = "im,mpim"
-    else:
-        slack_types = "public_channel,private_channel,mpim,im"
+    # Which categories the caller wants
+    want_channels = types in ("all", "channels")
+    want_dms = types in ("all", "dms")
 
     # Warm the user directory (one cached users.list call) so DMs and group
     # DMs show people's names instead of raw IDs / mpdm- strings
     await client.ensure_user_directory()
 
-    conversations = await client.list_conversations(types=slack_types, max_pages=0)
+    # Shared cached full listing (paginated once per session, then reused)
+    conversations = await client.ensure_all_conversations()
 
     # Categorize conversations
     channels = []
@@ -46,6 +43,12 @@ async def list_conversations(
     group_dms = []
 
     for conv in conversations:
+        is_dm = conv.is_im or conv.is_mpim
+        if is_dm and not want_dms:
+            continue
+        if not is_dm and not want_channels:
+            continue
+
         display_name = conv.display_name
         if conv.is_im and conv.user:
             cached_user = client._users_cache.get(conv.user)

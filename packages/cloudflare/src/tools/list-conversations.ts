@@ -35,24 +35,16 @@ export async function listConversations(
 ): Promise<ListConversationsResult> {
   const { types = "all" } = options;
 
-  // Map type filter to Slack API types
-  let slackTypes: string;
-  if (types === "channels") {
-    slackTypes = "public_channel,private_channel";
-  } else if (types === "dms") {
-    slackTypes = "im,mpim";
-  } else {
-    slackTypes = "public_channel,private_channel,mpim,im";
-  }
+  // Which categories the caller wants
+  const wantChannels = types === "all" || types === "channels";
+  const wantDms = types === "all" || types === "dms";
 
   // Warm the user directory (one cached users.list call) so DMs and group
   // DMs show people's names instead of raw IDs / mpdm- strings
   await client.ensureUserDirectory();
 
-  const conversations = await client.listConversations({
-    types: slackTypes,
-    maxPages: 0,
-  });
+  // Shared cached full listing (paginated once per session, then reused)
+  const conversations = await client.ensureAllConversations();
 
   // Categorize conversations
   const channels: ConversationEntry[] = [];
@@ -61,6 +53,10 @@ export async function listConversations(
   const groupDms: ConversationEntry[] = [];
 
   for (const conv of conversations) {
+    const isDm = conv.is_im || conv.is_mpim;
+    if (isDm && !wantDms) continue;
+    if (!isDm && !wantChannels) continue;
+
     // Get display name - use cache for DMs
     let displayName = conv.name || conv.id;
     if (conv.is_im && conv.user) {

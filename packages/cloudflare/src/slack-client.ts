@@ -64,6 +64,8 @@ export class SlackClient {
   private userNameIndex: Map<string, SlackUser> = new Map(); // normalized name -> user
   private usersListTime: number = 0;
   private conversationsCache: Map<string, SlackConversation> = new Map();
+  private allConvsCache?: SlackConversation[];
+  private allConvsTime: number = 0;
   private lastReadCache: Map<string, string> = new Map();
   private cacheTime: number = 0;
 
@@ -166,12 +168,16 @@ export class SlackClient {
     excludeArchived?: boolean;
     limit?: number;
     maxPages?: number;
+    pagePauseMs?: number;
   } = {}): Promise<SlackConversation[]> {
     const {
       types = "public_channel,private_channel,mpim,im",
       excludeArchived = true,
       limit = 200,
       maxPages = 3,
+      // conversations.list is Tier-2 (~20 req/min); pacing full pagination
+      // avoids 429 backoffs that cost far more than the pause itself
+      pagePauseMs = 0,
     } = options;
 
     const conversations: SlackConversation[] = [];
@@ -208,10 +214,39 @@ export class SlackClient {
       if (!cursor || (maxPages > 0 && pagesFetched >= maxPages)) {
         break;
       }
+
+      if (pagePauseMs) {
+        await sleep(pagePauseMs);
+      }
     }
 
     this.cacheTime = Date.now();
     return conversations;
+  }
+
+  /**
+   * Return every accessible conversation, fetched once and cached.
+   *
+   * conversations.list is heavily throttled, so name-based tools
+   * (findConversation, listConversations) share this cached full listing
+   * instead of re-paginating on every call. Only the first call per TTL
+   * window pays the cost; the rest are instant.
+   *
+   * @param ttlMs Milliseconds before the cached listing is considered stale
+   */
+  async ensureAllConversations(ttlMs: number = 1_800_000): Promise<SlackConversation[]> {
+    if (this.allConvsCache && Date.now() - this.allConvsTime < ttlMs) {
+      return this.allConvsCache;
+    }
+
+    const convs = await this.listConversations({
+      types: "public_channel,private_channel,mpim,im",
+      maxPages: 0,
+      pagePauseMs: 1000,
+    });
+    this.allConvsCache = convs;
+    this.allConvsTime = Date.now();
+    return convs;
   }
 
   /**
@@ -490,8 +525,14 @@ export class SlackClient {
    *
    * @param limit Max results per page
    * @param maxPages Maximum pages to fetch (0 = unlimited)
+   * @param pagePauseMs Milliseconds between pages. users.list is Tier-2
+   *        (~20 req/min); pacing avoids 429 backoffs that cost more than the pause.
    */
-  async listUsers(limit: number = 200, maxPages: number = 0): Promise<SlackUser[]> {
+  async listUsers(
+    limit: number = 200,
+    maxPages: number = 0,
+    pagePauseMs: number = 1000
+  ): Promise<SlackUser[]> {
     const users: SlackUser[] = [];
     let cursor: string | undefined;
     let pagesFetched = 0;
@@ -519,6 +560,10 @@ export class SlackClient {
       cursor = data.response_metadata?.next_cursor;
       if (!cursor || (maxPages > 0 && pagesFetched >= maxPages)) {
         break;
+      }
+
+      if (pagePauseMs) {
+        await sleep(pagePauseMs);
       }
     }
 

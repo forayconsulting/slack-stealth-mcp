@@ -92,7 +92,7 @@ async def find_conversation(
     client = manager.get_client(workspace)
 
     directory_ok = await client.ensure_user_directory()
-    conversations = await client.list_conversations(max_pages=0)
+    conversations = await client.ensure_all_conversations()
 
     matches: list[dict[str, Any]] = []
     dm_user_ids: set[str] = set()

@@ -82,6 +82,8 @@ class SlackClient:
         self._user_name_index: Dict[str, SlackUser] = {}  # normalized name -> user
         self._users_list_time: float = 0
         self._conversations_cache: Dict[str, SlackConversation] = {}
+        self._all_convs_cache: Optional[List[SlackConversation]] = None
+        self._all_convs_time: float = 0
         self._last_read_cache: Dict[str, str] = {}  # channel_id -> last_read ts
         self._cache_time: float = 0
 
@@ -174,6 +176,7 @@ class SlackClient:
         exclude_archived: bool = True,
         limit: int = 200,
         max_pages: int = 3,
+        page_pause: float = 0.0,
     ) -> List[SlackConversation]:
         """List conversations the user has access to.
 
@@ -182,6 +185,9 @@ class SlackClient:
             exclude_archived: Whether to exclude archived channels
             limit: Max results per page
             max_pages: Maximum number of pages to fetch (default 3, set to 0 for unlimited)
+            page_pause: Seconds to wait between pages. conversations.list is a
+                Tier-2 method (~20 req/min); pacing full pagination avoids 429
+                backoffs that are far slower than the pause itself.
 
         Returns:
             List of conversations
@@ -228,8 +234,42 @@ class SlackClient:
             if not cursor or (max_pages > 0 and pages_fetched >= max_pages):
                 break
 
+            if page_pause:
+                await asyncio.sleep(page_pause)
+
         self._cache_time = time.monotonic()
         return conversations
+
+    async def ensure_all_conversations(
+        self, ttl: float = 1800.0
+    ) -> List[SlackConversation]:
+        """Return every accessible conversation, fetched once and cached.
+
+        conversations.list is heavily throttled, so name-based tools
+        (find_conversation, list_conversations) share this cached full listing
+        instead of re-paginating on every call. Only the first call per TTL
+        window pays the cost; the rest are instant.
+
+        Args:
+            ttl: Seconds before the cached listing is considered stale
+
+        Returns:
+            All conversations across every type (paced pagination)
+        """
+        if (
+            self._all_convs_cache is not None
+            and time.monotonic() - self._all_convs_time < ttl
+        ):
+            return self._all_convs_cache
+
+        convs = await self.list_conversations(
+            types="public_channel,private_channel,mpim,im",
+            max_pages=0,
+            page_pause=1.0,
+        )
+        self._all_convs_cache = convs
+        self._all_convs_time = time.monotonic()
+        return convs
 
     async def get_conversation_info(self, channel: str) -> SlackConversation:
         """Get detailed info about a conversation.
@@ -550,7 +590,9 @@ class SlackClient:
             except Exception:
                 pass  # Silently ignore - will show truncated ID as fallback
 
-    async def list_users(self, limit: int = 200, max_pages: int = 0) -> List[SlackUser]:
+    async def list_users(
+        self, limit: int = 200, max_pages: int = 0, page_pause: float = 1.0
+    ) -> List[SlackUser]:
         """Fetch the workspace user directory via users.list.
 
         Populates the ID cache and the name index used for name -> user lookup.
@@ -558,6 +600,8 @@ class SlackClient:
         Args:
             limit: Max results per page
             max_pages: Maximum pages to fetch (0 = unlimited)
+            page_pause: Seconds between pages. users.list is Tier-2 (~20 req/min);
+                pacing avoids 429 backoffs that cost far more than the pause.
 
         Returns:
             List of active (non-deleted) users
@@ -584,6 +628,9 @@ class SlackClient:
             cursor = data.get("response_metadata", {}).get("next_cursor")
             if not cursor or (max_pages > 0 and pages_fetched >= max_pages):
                 break
+
+            if page_pause:
+                await asyncio.sleep(page_pause)
 
         self._users_list_time = time.monotonic()
         return users

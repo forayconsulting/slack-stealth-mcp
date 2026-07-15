@@ -110,7 +110,7 @@ export async function findConversation(
   const { query, includeUsers = true, limit = 15 } = options;
 
   const directoryOk = await client.ensureUserDirectory();
-  const conversations = await client.listConversations({ maxPages: 0 });
+  const conversations = await client.ensureAllConversations();
 
   const matches: ConversationMatch[] = [];
   const dmUserIds = new Set<string>();
