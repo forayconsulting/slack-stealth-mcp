@@ -250,6 +250,92 @@ export class SlackClient {
   }
 
   /**
+   * List only conversations the user is a member of (users.conversations).
+   *
+   * Far smaller and faster than conversations.list on large workspaces - this
+   * is the user's own membership set, not every channel in the org.
+   */
+  async listMemberConversations(options: {
+    types?: string;
+    limit?: number;
+    maxPages?: number;
+  } = {}): Promise<SlackConversation[]> {
+    const {
+      types = "public_channel,private_channel,mpim,im",
+      limit = 200,
+      maxPages = 0,
+    } = options;
+
+    const conversations: SlackConversation[] = [];
+    let cursor: string | undefined;
+    let pagesFetched = 0;
+
+    while (true) {
+      const params: Record<string, string | number | boolean> = {
+        types,
+        exclude_archived: true,
+        limit,
+      };
+      if (cursor) params.cursor = cursor;
+
+      const data = await this.request<{
+        channels: Array<Record<string, unknown>>;
+        response_metadata?: { next_cursor?: string };
+      }>("GET", "users.conversations", { params });
+
+      pagesFetched++;
+
+      for (const ch of data.channels || []) {
+        const conv = this.parseConversation(ch);
+        conversations.push(conv);
+        this.conversationsCache.set(conv.id, conv);
+        if (conv.last_read) {
+          this.lastReadCache.set(conv.id, conv.last_read);
+        }
+      }
+
+      cursor = data.response_metadata?.next_cursor;
+      if (!cursor || (maxPages > 0 && pagesFetched >= maxPages)) {
+        break;
+      }
+    }
+
+    return conversations;
+  }
+
+  /**
+   * Search channels by name via Slack's internal quick-switcher endpoint.
+   *
+   * This is what Slack's own Cmd+K search uses: the server matches the query
+   * and returns a handful of results (including channels you have not joined)
+   * without enumerating the whole workspace.
+   *
+   * Read-only. Throws SlackAPIError if the endpoint is unavailable so callers
+   * can fall back to a full listing.
+   */
+  async searchChannels(query: string, count: number = 25): Promise<SlackConversation[]> {
+    const data = await this.request<{
+      items?: Array<Record<string, unknown>>;
+    }>("POST", "search.modules.channels", {
+      data: {
+        token: this.xoxcToken,
+        module: "channels",
+        query,
+        count,
+      },
+    });
+
+    const results: SlackConversation[] = [];
+    for (const item of data.items || []) {
+      if (!item || !item.id) continue;
+      const conv = this.parseConversation(item);
+      results.push(conv);
+      this.conversationsCache.set(conv.id, conv);
+    }
+    return results;
+  }
+
+  /**
    * Get detailed info about a conversation
    */
   async getConversationInfo(channel: string): Promise<SlackConversation> {

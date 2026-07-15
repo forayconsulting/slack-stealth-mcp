@@ -209,21 +209,7 @@ class SlackClient:
             pages_fetched += 1
 
             for ch in data.get("channels", []):
-                conv = SlackConversation(
-                    id=ch["id"],
-                    name=ch.get("name"),
-                    is_channel=ch.get("is_channel", False),
-                    is_group=ch.get("is_group", False),
-                    is_im=ch.get("is_im", False),
-                    is_mpim=ch.get("is_mpim", False),
-                    is_private=ch.get("is_private", False),
-                    is_archived=ch.get("is_archived", False),
-                    is_member=ch.get("is_member", True),
-                    user=ch.get("user"),
-                    last_read=ch.get("last_read"),
-                    unread_count=ch.get("unread_count"),
-                    unread_count_display=ch.get("unread_count_display"),
-                )
+                conv = self._parse_conversation(ch)
                 conversations.append(conv)
                 self._conversations_cache[conv.id] = conv
                 if conv.last_read:
@@ -239,6 +225,93 @@ class SlackClient:
 
         self._cache_time = time.monotonic()
         return conversations
+
+    async def list_member_conversations(
+        self,
+        types: str = "public_channel,private_channel,mpim,im",
+        limit: int = 200,
+        max_pages: int = 0,
+    ) -> List[SlackConversation]:
+        """List only conversations the user is a member of (users.conversations).
+
+        Far smaller and faster than conversations.list on large workspaces -
+        this is the user's own membership set, not every channel in the org.
+
+        Args:
+            types: Comma-separated conversation types
+            limit: Max results per page
+            max_pages: Maximum pages (0 = unlimited)
+
+        Returns:
+            The user's member conversations
+        """
+        conversations: List[SlackConversation] = []
+        cursor: Optional[str] = None
+        pages_fetched = 0
+
+        while True:
+            params: Dict[str, Any] = {
+                "types": types,
+                "exclude_archived": "true",
+                "limit": limit,
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            data = await self._request("GET", "users.conversations", params=params)
+            pages_fetched += 1
+
+            for ch in data.get("channels", []):
+                conv = self._parse_conversation(ch)
+                conversations.append(conv)
+                self._conversations_cache[conv.id] = conv
+                if conv.last_read:
+                    self._last_read_cache[conv.id] = conv.last_read
+
+            cursor = data.get("response_metadata", {}).get("next_cursor")
+            if not cursor or (max_pages > 0 and pages_fetched >= max_pages):
+                break
+
+        return conversations
+
+    async def search_channels(
+        self, query: str, count: int = 25
+    ) -> List[SlackConversation]:
+        """Search channels by name via Slack's internal quick-switcher endpoint.
+
+        This is what Slack's own Cmd+K search uses: the server matches the query
+        and returns a handful of results (including channels you have not joined)
+        without enumerating the whole workspace.
+
+        Read-only. Raises SlackAPIError if the endpoint is unavailable so callers
+        can fall back to a full listing.
+
+        Args:
+            query: Channel name (or fragment) to match
+            count: Max results to request
+
+        Returns:
+            Matching channels (server-ranked)
+        """
+        data = await self._request(
+            "POST",
+            "search.modules.channels",
+            data={
+                "token": self._config.xoxc_token,
+                "module": "channels",
+                "query": query,
+                "count": count,
+            },
+        )
+
+        results: List[SlackConversation] = []
+        for item in data.get("items", []):
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            conv = self._parse_conversation(item)
+            results.append(conv)
+            self._conversations_cache[conv.id] = conv
+        return results
 
     async def ensure_all_conversations(
         self, ttl: float = 1800.0
@@ -286,22 +359,11 @@ class SlackClient:
             params={"channel": channel, "include_num_members": "true"},
         )
 
-        ch = data["channel"]
-        return SlackConversation(
-            id=ch["id"],
-            name=ch.get("name"),
-            is_channel=ch.get("is_channel", False),
-            is_group=ch.get("is_group", False),
-            is_im=ch.get("is_im", False),
-            is_mpim=ch.get("is_mpim", False),
-            is_private=ch.get("is_private", False),
-            is_archived=ch.get("is_archived", False),
-            is_member=ch.get("is_member", True),
-            user=ch.get("user"),
-            last_read=ch.get("last_read"),
-            unread_count=ch.get("unread_count"),
-            unread_count_display=ch.get("unread_count_display"),
-        )
+        conv = self._parse_conversation(data["channel"])
+        self._conversations_cache[conv.id] = conv
+        if conv.last_read:
+            self._last_read_cache[conv.id] = conv.last_read
+        return conv
 
     async def get_conversation_history(
         self,
@@ -726,6 +788,24 @@ class SlackClient:
                 key = normalize_name(name)
                 if key:
                     self._user_name_index[key] = user
+
+    def _parse_conversation(self, ch: Dict[str, Any]) -> SlackConversation:
+        """Parse a conversation from any Slack response (list/info/search)."""
+        return SlackConversation(
+            id=ch["id"],
+            name=ch.get("name"),
+            is_channel=ch.get("is_channel", False),
+            is_group=ch.get("is_group", False),
+            is_im=ch.get("is_im", False),
+            is_mpim=ch.get("is_mpim", False),
+            is_private=ch.get("is_private", False),
+            is_archived=ch.get("is_archived", False),
+            is_member=ch.get("is_member", True),
+            user=ch.get("user"),
+            last_read=ch.get("last_read"),
+            unread_count=ch.get("unread_count"),
+            unread_count_display=ch.get("unread_count_display"),
+        )
 
     def _parse_message(self, data: Dict[str, Any]) -> SlackMessage:
         """Parse a message from API response."""

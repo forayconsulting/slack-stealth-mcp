@@ -26,6 +26,7 @@ interface FindConversationResult {
   count: number;
   matches: ConversationMatch[];
   warning?: string;
+  note?: string;
   hint?: string;
 }
 
@@ -110,12 +111,45 @@ export async function findConversation(
   const { query, includeUsers = true, limit = 15 } = options;
 
   const directoryOk = await client.ensureUserDirectory();
-  const conversations = await client.ensureAllConversations();
+
+  // Channels: ask Slack's server-side search (instant, and finds channels you
+  // haven't joined). Fall back to the full cached listing only if the search
+  // endpoint is unavailable.
+  let searchOk = true;
+  let channelConvs: SlackConversation[];
+  try {
+    channelConvs = await client.searchChannels(query);
+  } catch {
+    searchOk = false;
+    channelConvs = (await client.ensureAllConversations()).filter(
+      (c) => !(c.is_im || c.is_mpim)
+    );
+  }
+
+  // DMs and group DMs: your membership set, not the whole workspace
+  const memberConvs = await client.listMemberConversations({ types: "im,mpim" });
 
   const matches: ConversationMatch[] = [];
   const dmUserIds = new Set<string>();
 
-  for (const conv of conversations) {
+  for (const conv of channelConvs) {
+    if (!conv.name) continue;
+    const base = scoreName(query, conv.name);
+    // Server-side hits are already relevant; floor the score so they surface
+    // even when Slack matched on purpose/topic, while exact/prefix name
+    // matches still rank above the floor.
+    const score = searchOk ? Math.max(base, 50) : base;
+    if (score) {
+      matches.push({
+        id: conv.id,
+        name: conv.name,
+        type: getConversationType(conv),
+        score,
+      });
+    }
+  }
+
+  for (const conv of memberConvs) {
     if (conv.is_im) {
       if (!conv.user) continue;
       dmUserIds.add(conv.user);
@@ -148,17 +182,6 @@ export async function findConversation(
           id: conv.id,
           name: display,
           type: "group_dm",
-          score,
-        });
-      }
-    } else {
-      if (!conv.name) continue;
-      const score = scoreName(query, conv.name);
-      if (score) {
-        matches.push({
-          id: conv.id,
-          name: conv.name,
-          type: getConversationType(conv),
           score,
         });
       }
@@ -195,6 +218,10 @@ export async function findConversation(
   if (!directoryOk) {
     result.warning =
       "User directory unavailable - DM and people matching may be incomplete";
+  }
+  if (!searchOk) {
+    result.note =
+      "Channel search endpoint unavailable - used the full cached listing instead";
   }
   if (topMatches.length === 0) {
     result.hint =

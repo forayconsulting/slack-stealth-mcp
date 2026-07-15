@@ -39,12 +39,19 @@ export async function listConversations(
   const wantChannels = types === "all" || types === "channels";
   const wantDms = types === "all" || types === "dms";
 
+  const slackTypes: string[] = [];
+  if (wantChannels) slackTypes.push("public_channel", "private_channel");
+  if (wantDms) slackTypes.push("im", "mpim");
+
   // Warm the user directory (one cached users.list call) so DMs and group
   // DMs show people's names instead of raw IDs / mpdm- strings
   await client.ensureUserDirectory();
 
-  // Shared cached full listing (paginated once per session, then reused)
-  const conversations = await client.ensureAllConversations();
+  // Your membership set (users.conversations) - fast, and the practically
+  // useful "my conversations" list rather than every channel in the org
+  const conversations = await client.listMemberConversations({
+    types: slackTypes.join(","),
+  });
 
   // Categorize conversations
   const channels: ConversationEntry[] = [];

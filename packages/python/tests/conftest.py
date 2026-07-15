@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 import pytest
 
-from slack_stealth_mcp.slack_client import SlackAPIError, SlackClient
+from slack_stealth_mcp.slack_client import SlackAPIError, SlackClient, normalize_name
 from slack_stealth_mcp.types import WorkspaceConfig
 
 # -----------------------------------------------------------------------------
@@ -222,6 +222,25 @@ def default_responses() -> dict[str, Any]:
             messages = [m for m in messages if m["ts"] > oldest]
         return {"ok": True, "messages": messages[:limit]}
 
+    def users_conversations(method: str, endpoint: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        # Member set - the fake user belongs to every canned conversation
+        types = kwargs.get("params", {}).get(
+            "types", "public_channel,private_channel,mpim,im"
+        )
+        channels = [c for c in RAW_CONVS.values() if _conv_matches_types(c, types)]
+        return {"ok": True, "channels": channels, "response_metadata": {}}
+
+    def search_channels(method: str, endpoint: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        # Simulate server-side name search over (non-DM) channels
+        q = normalize_name(kwargs.get("data", {}).get("query", ""))
+        items = []
+        for c in RAW_CONVS.values():
+            if c.get("is_im") or c.get("is_mpim"):
+                continue
+            if q and q in normalize_name(c.get("name") or ""):
+                items.append(c)
+        return {"ok": True, "items": items, "pagination": {"total_count": len(items)}}
+
     return {
         "users.list": {"ok": True, "members": USERS, "response_metadata": {}},
         "users.info": lambda m, e, kw: {
@@ -233,6 +252,8 @@ def default_responses() -> dict[str, Any]:
         "conversations.list": conversations_list,
         "conversations.info": conversations_info,
         "conversations.history": conversations_history,
+        "users.conversations": users_conversations,
+        "search.modules.channels": search_channels,
         "client.counts": DEFAULT_COUNTS,
         "auth.test": {"ok": True, "user_id": "U0ME", "team": "testteam"},
         "search.messages": DEFAULT_SEARCH,

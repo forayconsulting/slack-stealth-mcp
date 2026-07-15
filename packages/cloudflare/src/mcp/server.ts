@@ -358,8 +358,10 @@ export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
     // =========================================================================
     this.server.tool(
       "slack_list_conversations",
-      "List all available conversations in the workspace. " +
-        "Returns channels, private channels, DMs, and group DMs that you have access to.",
+      "List the conversations you're a member of (your channels, private " +
+        "channels, DMs, and group DMs - not every channel in the workspace). " +
+        "To find a specific channel or person by name, including channels you " +
+        "haven't joined, use slack_find_conversation instead.",
       {
         types: z
           .enum(["all", "channels", "dms"])

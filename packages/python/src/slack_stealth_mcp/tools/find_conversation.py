@@ -92,12 +92,44 @@ async def find_conversation(
     client = manager.get_client(workspace)
 
     directory_ok = await client.ensure_user_directory()
-    conversations = await client.ensure_all_conversations()
+
+    # Channels: ask Slack's server-side search (instant, and finds channels you
+    # haven't joined). Fall back to the full cached listing only if the search
+    # endpoint is unavailable.
+    search_ok = True
+    try:
+        channel_convs = await client.search_channels(query)
+    except Exception:
+        search_ok = False
+        channel_convs = [
+            c
+            for c in await client.ensure_all_conversations()
+            if not (c.is_im or c.is_mpim)
+        ]
+
+    # DMs and group DMs: your membership set, not the whole workspace
+    member_convs = await client.list_member_conversations(types="im,mpim")
 
     matches: list[dict[str, Any]] = []
     dm_user_ids: set[str] = set()
 
-    for conv in conversations:
+    for conv in channel_convs:
+        if not conv.name:
+            continue
+        base = score_name(query, conv.name)
+        # Server-side hits are already relevant; floor the score so they surface
+        # even when Slack matched on purpose/topic, while exact/prefix name
+        # matches still rank above the floor.
+        score = max(base, 50) if search_ok else base
+        if score:
+            matches.append({
+                "id": conv.id,
+                "name": conv.name,
+                "type": conv.conversation_type,
+                "score": score,
+            })
+
+    for conv in member_convs:
         if conv.is_im:
             if not conv.user:
                 continue
@@ -130,17 +162,6 @@ async def find_conversation(
                     "type": "group_dm",
                     "score": score,
                 })
-        else:
-            if not conv.name:
-                continue
-            score = score_name(query, conv.name)
-            if score:
-                matches.append({
-                    "id": conv.id,
-                    "name": conv.name,
-                    "type": conv.conversation_type,
-                    "score": score,
-                })
 
     # People in the directory with no existing DM are still reachable:
     # slack_reply with target=U... opens one
@@ -171,6 +192,10 @@ async def find_conversation(
     if not directory_ok:
         result["warning"] = (
             "User directory unavailable - DM and people matching may be incomplete"
+        )
+    if not search_ok:
+        result["note"] = (
+            "Channel search endpoint unavailable - used the full cached listing instead"
         )
     if not matches:
         result["hint"] = (

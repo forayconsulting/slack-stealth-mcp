@@ -29,12 +29,20 @@ async def list_conversations(
     want_channels = types in ("all", "channels")
     want_dms = types in ("all", "dms")
 
+    # Map to the Slack conversation types we need to fetch
+    slack_types = []
+    if want_channels:
+        slack_types += ["public_channel", "private_channel"]
+    if want_dms:
+        slack_types += ["im", "mpim"]
+
     # Warm the user directory (one cached users.list call) so DMs and group
     # DMs show people's names instead of raw IDs / mpdm- strings
     await client.ensure_user_directory()
 
-    # Shared cached full listing (paginated once per session, then reused)
-    conversations = await client.ensure_all_conversations()
+    # Your membership set (users.conversations) - fast, and the practically
+    # useful "my conversations" list rather than every channel in the org
+    conversations = await client.list_member_conversations(types=",".join(slack_types))
 
     # Categorize conversations
     channels = []

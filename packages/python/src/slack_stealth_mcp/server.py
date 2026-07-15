@@ -375,10 +375,12 @@ IMPORTANT: This does NOT mark messages as read.""",
     ),
     Tool(
         name="slack_list_conversations",
-        description="""List all available conversations in the workspace.
+        description="""List the conversations you're a member of.
 
-Returns channels, private channels, DMs, and group DMs that you have access to.
-Includes unread counts for DMs.""",
+Returns the channels, private channels, DMs, and group DMs you belong to
+(your membership set, not every channel in the workspace). Includes unread
+counts for DMs. To find a specific channel or person by name - including
+channels you haven't joined - use slack_find_conversation instead.""",
         inputSchema={
             "type": "object",
             "properties": {
