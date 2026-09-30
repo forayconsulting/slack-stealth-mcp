@@ -22,6 +22,7 @@ import { findConversation } from "../tools/find-conversation";
 import { listConversations } from "../tools/list-conversations";
 import { markRead } from "../tools/mark-read";
 import { react } from "../tools/react";
+import { scheduleMessage, listScheduled, cancelScheduled } from "../tools/schedule";
 
 /**
  * MCP Server State
@@ -62,7 +63,10 @@ Mentions:
 - Reference channels as <#C01234567>.
 
 Channels and DMs can be referenced by ID, by pasted Slack URL, or found by
-name/person with slack_find_conversation.`;
+name/person with slack_find_conversation.
+
+To send a message later, use slack_schedule_message. Confirm the exact send
+time (with timezone) with the user before scheduling.`;
 
 /**
  * Slack Stealth MCP Server - Durable Object
@@ -211,6 +215,87 @@ export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
           threadTs: args.thread_ts,
           broadcast: args.broadcast,
         });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+    );
+
+    // =========================================================================
+    // slack_schedule_message - Schedule a message to send later
+    // =========================================================================
+    this.server.tool(
+      "slack_schedule_message",
+      "Schedule a message to be sent later (Slack's 'Schedule for later'). " +
+        "Slack's servers send it at send_at, even if no Slack app is open, and it appears " +
+        "in the user's Slack Scheduled list where they can edit or cancel it. " +
+        "send_at: ISO-8601 WITH a timezone offset (e.g. 2026-09-30T09:00:00-05:00) or Unix " +
+        "seconds; must be in the future and at most 120 days out. Confirm the exact time " +
+        "with the user when their request is ambiguous ('tomorrow morning'). " +
+        "Targets and formatting work the same as slack_reply: write Slack mrkdwn, mention " +
+        "people as <@USERID>, and use <!here> to address a group. " +
+        "Returns a scheduled_id for slack_cancel_scheduled.",
+      {
+        target: z
+          .string()
+          .describe("Channel ID (C...), User ID (U...), DM ID (D...), or Slack URL"),
+        message: z
+          .string()
+          .describe("Message text in Slack mrkdwn (*bold*, <@USERID> mentions, <!here>)"),
+        send_at: z
+          .string()
+          .describe("When to send: ISO-8601 with offset (2026-09-30T09:00:00-05:00) or Unix seconds"),
+        thread_ts: z
+          .string()
+          .optional()
+          .describe("Parent message timestamp for a thread reply"),
+      },
+      async (args) => {
+        const client = this.getClient();
+        const result = await scheduleMessage(client, {
+          target: args.target,
+          message: args.message,
+          sendAt: args.send_at,
+          threadTs: args.thread_ts,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+    );
+
+    // =========================================================================
+    // slack_list_scheduled - List pending scheduled messages
+    // =========================================================================
+    this.server.tool(
+      "slack_list_scheduled",
+      "List messages scheduled to send later, soonest first. " +
+        "Includes messages scheduled in the Slack app as well as by slack_schedule_message. " +
+        "Each entry has a scheduled_id for slack_cancel_scheduled.",
+      {},
+      async () => {
+        const client = this.getClient();
+        const result = await listScheduled(client);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+    );
+
+    // =========================================================================
+    // slack_cancel_scheduled - Cancel a scheduled message
+    // =========================================================================
+    this.server.tool(
+      "slack_cancel_scheduled",
+      "Cancel a scheduled message so it is never sent. " +
+        "Get the scheduled_id from slack_schedule_message or slack_list_scheduled. " +
+        "Only scheduled messages can be cancelled; ordinary drafts are never touched.",
+      {
+        scheduled_id: z.string().describe("ID of the scheduled message (Dr...)"),
+      },
+      async (args) => {
+        const client = this.getClient();
+        const result = await cancelScheduled(client, args.scheduled_id);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };

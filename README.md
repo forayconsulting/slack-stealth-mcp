@@ -224,6 +224,9 @@ export SLACK_XOXD_COOKIE="xoxd-..."
 | `slack_get_unread` | Get unread messages across ALL workspaces—perfect for "What's new in Slack?" Uses Slack's own badge state, so it matches what the app shows (including unread threads). |
 | `slack_find_conversation` | Find channels, DMs, group DMs, and people by name—turns "the design channel" or "my DM with Alice" into an ID the other tools accept. |
 | `slack_reply` | Send messages to channels, DMs, or threads. Accepts pasted Slack URLs, and always writes correct Slack formatting (mrkdwn, `<@USERID>` mentions, `<!here>`). |
+| `slack_schedule_message` | Schedule a message to send later, like Slack's "Schedule for later." Slack sends it even if your computer is off, and it shows in your Slack Scheduled list. |
+| `slack_list_scheduled` | List pending scheduled messages, including ones you scheduled in the Slack app |
+| `slack_cancel_scheduled` | Cancel a scheduled message before it sends |
 | `slack_react` | Add/remove emoji reactions to messages |
 | `slack_search` | Search with full Slack syntax (`in:`, `from:`, `has:`, date ranges) |
 | `slack_get_context` | Get conversation history for context (accepts a channel ID or a pasted Slack URL) |
@@ -260,6 +263,12 @@ export SLACK_XOXD_COOKIE="xoxd-..."
 "Reply to Sarah's last message saying I'll review it tomorrow"
 → Uses slack_get_context + slack_reply to thread
 
+"Send the team the release notes tomorrow at 9am"
+→ Uses slack_schedule_message with the send time and your timezone
+
+"What messages do I have scheduled?"
+→ Uses slack_list_scheduled
+
 "React to that message with a thumbs up"
 → Uses slack_react to add :+1: reaction
 
@@ -287,6 +296,7 @@ One of the key benefits of Slack Stealth MCP is **silent reading**:
 | `slack_get_context` | No | No |
 | `slack_reply` | No | No |
 | `slack_react` | No | No |
+| `slack_schedule_message` / `slack_list_scheduled` / `slack_cancel_scheduled` | No | No |
 | `slack_list_conversations` | No | No |
 | `slack_mark_read` | **Yes** | No |
 

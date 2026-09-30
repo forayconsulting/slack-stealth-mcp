@@ -23,6 +23,20 @@ export function getUserDisplayName(user: SlackUser): string {
 }
 
 /**
+ * A draft from Slack's internal drafts API. Scheduled messages are drafts
+ * with date_scheduled set.
+ */
+export interface SlackDraft {
+  id: string;
+  date_scheduled?: number;
+  is_sent?: boolean;
+  is_deleted?: boolean;
+  last_updated_ts?: string;
+  destinations?: Array<{ channel_id?: string; thread_ts?: string; user_ids?: string[] }>;
+  blocks?: Array<{ type: string; [key: string]: unknown }>;
+}
+
+/**
  * Represents a Slack message
  */
 export interface SlackMessage {

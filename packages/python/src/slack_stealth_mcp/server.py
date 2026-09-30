@@ -14,13 +14,16 @@ from .config import load_config
 from .tools import (
     auth_login,
     auth_status,
+    cancel_scheduled,
     find_conversation,
     get_context,
     get_unread,
     list_conversations,
+    list_scheduled,
     mark_read,
     react,
     reply,
+    schedule_message,
     search,
 )
 from .workspace import WorkspaceManager
@@ -48,7 +51,10 @@ Mentions:
 - Reference channels as <#C01234567>.
 
 Channels and DMs can be referenced by ID, by pasted Slack URL, or found by
-name/person with slack_find_conversation."""
+name/person with slack_find_conversation.
+
+To send a message later, use slack_schedule_message. Confirm the exact send
+time (with timezone) with the user before scheduling."""
 
 # Initialize MCP server
 server = Server("slack-stealth-mcp", instructions=SERVER_INSTRUCTIONS)
@@ -237,6 +243,87 @@ IMPORTANT: This does NOT mark the channel as read.""",
                 },
             },
             "required": ["target", "message"],
+        },
+    ),
+    Tool(
+        name="slack_schedule_message",
+        description="""Schedule a message to be sent later (Slack's "Schedule for later").
+
+Slack's servers send it at send_at, even if no Slack app is open. It also
+appears in the user's Slack "Scheduled" list, where they can edit or cancel it.
+
+send_at: ISO-8601 with a timezone offset (e.g. 2026-09-30T09:00:00-05:00),
+or Unix seconds. A time without an offset is taken as this computer's local
+time. Must be in the future and at most 120 days out. Confirm the exact time
+with the user when their request is ambiguous ("tomorrow morning").
+
+Targets and formatting work the same as slack_reply: write Slack mrkdwn,
+mention people as <@USERID>, and use <!here> to address a group.
+
+Returns a scheduled_id for slack_cancel_scheduled.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "Channel ID (C...), User ID (U...), DM ID (D...), or Slack URL",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Message text in Slack mrkdwn (*bold*, <@USERID> mentions, <!here>)",
+                },
+                "send_at": {
+                    "type": "string",
+                    "description": "When to send: ISO-8601 with offset (2026-09-30T09:00:00-05:00) or Unix seconds",
+                },
+                "thread_ts": {
+                    "type": "string",
+                    "description": "Parent message timestamp for a thread reply",
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace name (uses default if not specified)",
+                },
+            },
+            "required": ["target", "message", "send_at"],
+        },
+    ),
+    Tool(
+        name="slack_list_scheduled",
+        description="""List messages scheduled to send later, soonest first.
+
+Includes messages scheduled in the Slack app as well as by
+slack_schedule_message. Each entry has a scheduled_id for
+slack_cancel_scheduled.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace name (uses default if not specified)",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="slack_cancel_scheduled",
+        description="""Cancel a scheduled message so it is never sent.
+
+Get the scheduled_id from slack_schedule_message or slack_list_scheduled.
+Only scheduled messages can be cancelled; ordinary drafts are never touched.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "scheduled_id": {
+                    "type": "string",
+                    "description": "ID of the scheduled message (Dr...)",
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace name (uses default if not specified)",
+                },
+            },
+            "required": ["scheduled_id"],
         },
     ),
     Tool(
@@ -516,6 +603,29 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 message=arguments["message"],
                 thread_ts=arguments.get("thread_ts"),
                 broadcast=arguments.get("broadcast", False),
+                workspace=arguments.get("workspace"),
+            )
+
+        elif name == "slack_schedule_message":
+            result = await schedule_message(
+                manager=manager,
+                target=arguments["target"],
+                message=arguments["message"],
+                send_at=arguments["send_at"],
+                thread_ts=arguments.get("thread_ts"),
+                workspace=arguments.get("workspace"),
+            )
+
+        elif name == "slack_list_scheduled":
+            result = await list_scheduled(
+                manager=manager,
+                workspace=arguments.get("workspace"),
+            )
+
+        elif name == "slack_cancel_scheduled":
+            result = await cancel_scheduled(
+                manager=manager,
+                scheduled_id=arguments["scheduled_id"],
                 workspace=arguments.get("workspace"),
             )
 

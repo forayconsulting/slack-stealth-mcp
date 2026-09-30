@@ -13,6 +13,7 @@
 import { RateLimiter } from "./rate-limiter";
 import type {
   SlackConversation,
+  SlackDraft,
   SlackMessage,
   SlackSearchResult,
   SlackUser,
@@ -467,6 +468,71 @@ export class SlackClient {
     }>("POST", "chat.postMessage", { data });
 
     return this.parseMessage(response.message);
+  }
+
+  // =========================================================================
+  // Drafts API (internal; backs Slack's "Schedule for later")
+  // =========================================================================
+
+  /**
+   * Create a draft, optionally scheduled for sending.
+   *
+   * A draft with dateScheduled set is sent by Slack's servers at that time
+   * and shows in the user's Scheduled list. The public chat.scheduleMessage
+   * rejects session tokens, so this is the only scheduling path available.
+   */
+  async createDraft(
+    channel: string,
+    blocks: unknown[],
+    options: { threadTs?: string; dateScheduled?: number } = {}
+  ): Promise<SlackDraft> {
+    const destination: Record<string, string> = { channel_id: channel };
+    if (options.threadTs) destination.thread_ts = options.threadTs;
+
+    const data: Record<string, string | number | boolean> = {
+      blocks: JSON.stringify(blocks),
+      destinations: JSON.stringify([destination]),
+      client_msg_id: crypto.randomUUID(),
+      file_ids: "[]",
+      is_from_composer: true,
+    };
+    if (options.dateScheduled) data.date_scheduled = Math.floor(options.dateScheduled);
+
+    const response = await this.request<{ draft: SlackDraft }>("POST", "drafts.create", { data });
+    return response.draft;
+  }
+
+  /**
+   * List the user's active drafts, including scheduled ones.
+   * drafts.list has no cursor; active drafts rarely exceed one page.
+   */
+  async listDrafts(limit: number = 100): Promise<SlackDraft[]> {
+    const response = await this.request<{ drafts?: SlackDraft[] }>("POST", "drafts.list", {
+      data: { is_active: true, limit },
+    });
+    return response.drafts ?? [];
+  }
+
+  /**
+   * Delete a draft (cancels it if scheduled).
+   *
+   * Slack rejects the stored 6-decimal last_updated_ts as a conflict; it
+   * wants it padded to 7 decimals. If that still conflicts, retry with the
+   * current time, which some workspaces require instead.
+   */
+  async deleteDraft(draftId: string, lastUpdatedTs: string): Promise<void> {
+    const [integer, frac = ""] = lastUpdatedTs.split(".");
+    const padded = `${integer}.${frac.padEnd(7, "0")}`;
+    try {
+      await this.request("POST", "drafts.delete", {
+        data: { draft_id: draftId, client_last_updated_ts: padded },
+      });
+    } catch (error) {
+      if ((error as SlackAPIError).error !== "draft_has_conflict") throw error;
+      await this.request("POST", "drafts.delete", {
+        data: { draft_id: draftId, client_last_updated_ts: (Date.now() / 1000).toFixed(7) },
+      });
+    }
   }
 
   // =========================================================================

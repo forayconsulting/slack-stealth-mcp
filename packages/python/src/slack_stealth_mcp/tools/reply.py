@@ -6,8 +6,20 @@ from typing import Any
 
 from ..mrkdwn import normalize_mrkdwn
 from ..refs import resolve_channel_ref
-from ..slack_client import SlackAPIError
+from ..slack_client import SlackAPIError, SlackClient
 from ..workspace import WorkspaceManager
+
+
+async def conversation_label(client: SlackClient, channel_id: str) -> str:
+    """Human-readable name for a conversation, falling back to its ID."""
+    try:
+        conv = await client.get_conversation_info(channel_id)
+        if conv.is_im and conv.user:
+            user = await client.get_user_info(conv.user)
+            return f"DM with @{user.display}"
+        return conv.display_name
+    except Exception:
+        return channel_id
 
 
 async def reply(
@@ -86,17 +98,7 @@ async def reply(
             if broadcast:
                 result["broadcasted"] = True
 
-        # Try to get channel name for context
-        try:
-            conv = await client.get_conversation_info(channel_id)
-            if conv.is_im and conv.user:
-                user = await client.get_user_info(conv.user)
-                result["sent_to"] = f"DM with @{user.display}"
-            else:
-                result["sent_to"] = conv.display_name
-        except Exception:
-            result["sent_to"] = channel_id
-
+        result["sent_to"] = await conversation_label(client, channel_id)
         return result
 
     except SlackAPIError as e:

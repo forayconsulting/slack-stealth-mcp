@@ -1,8 +1,10 @@
 """Async Slack API client using xoxc/xoxd session tokens."""
 
 import asyncio
+import json
 import re
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -507,6 +509,83 @@ class SlackClient:
 
         data = await self._request("POST", "chat.postMessage", data=payload)
         return self._parse_message(data["message"])
+
+    # =========================================================================
+    # Drafts API (internal; backs Slack's "Schedule for later")
+    # =========================================================================
+
+    async def create_draft(
+        self,
+        channel: str,
+        blocks: List[Dict[str, Any]],
+        thread_ts: Optional[str] = None,
+        date_scheduled: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Create a draft, optionally scheduled for sending.
+
+        A draft with date_scheduled set is sent by Slack's servers at that
+        time and shows in the user's Scheduled list. The public
+        chat.scheduleMessage rejects session tokens, so this is the only
+        scheduling path available to us.
+
+        Args:
+            channel: Channel ID (C/D/G - not a user ID)
+            blocks: rich_text blocks (see rich_text.mrkdwn_to_rich_text)
+            thread_ts: Parent message ts for a thread reply
+            date_scheduled: Unix seconds to send at
+
+        Returns:
+            The created draft object
+        """
+        destination: Dict[str, Any] = {"channel_id": channel}
+        if thread_ts:
+            destination["thread_ts"] = thread_ts
+        payload: Dict[str, Any] = {
+            "blocks": json.dumps(blocks),
+            "destinations": json.dumps([destination]),
+            "client_msg_id": str(uuid.uuid4()),
+            "file_ids": "[]",
+            "is_from_composer": "true",
+        }
+        if date_scheduled:
+            payload["date_scheduled"] = str(int(date_scheduled))
+
+        data = await self._request("POST", "drafts.create", data=payload)
+        return data["draft"]
+
+    async def list_drafts(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """List the user's active drafts, including scheduled ones.
+
+        drafts.list has no cursor; active drafts rarely exceed one page.
+        """
+        data = await self._request(
+            "POST", "drafts.list", data={"is_active": "true", "limit": str(limit)}
+        )
+        return data.get("drafts", [])
+
+    async def delete_draft(self, draft_id: str, last_updated_ts: str) -> None:
+        """Delete a draft (cancels it if scheduled).
+
+        Slack rejects the stored 6-decimal last_updated_ts as a conflict; it
+        wants it padded to 7 decimals. If that still conflicts, retry with
+        the current time, which some workspaces require instead.
+        """
+        integer, _, frac = last_updated_ts.partition(".")
+        padded = f"{integer}.{frac:<07}"
+        try:
+            await self._request(
+                "POST",
+                "drafts.delete",
+                data={"draft_id": draft_id, "client_last_updated_ts": padded},
+            )
+        except SlackAPIError as e:
+            if e.error != "draft_has_conflict":
+                raise
+            await self._request(
+                "POST",
+                "drafts.delete",
+                data={"draft_id": draft_id, "client_last_updated_ts": f"{time.time():.7f}"},
+            )
 
     # =========================================================================
     # Reactions API

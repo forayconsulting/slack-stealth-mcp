@@ -6,6 +6,26 @@ import { SlackClient, SlackAPIError } from "../slack-client";
 import { normalizeMrkdwn } from "../mrkdwn";
 import { resolveChannelRef } from "../refs";
 
+/**
+ * Human-readable name for a conversation, falling back to its ID.
+ */
+export async function conversationLabel(
+  client: SlackClient,
+  channelId: string
+): Promise<string> {
+  try {
+    const conv = await client.getConversationInfo(channelId);
+    if (conv.is_im && conv.user) {
+      const user = await client.getUserInfo(conv.user);
+      const displayName = user.display_name || user.real_name || user.name;
+      return `DM with @${displayName}`;
+    }
+    return conv.name || channelId;
+  } catch {
+    return channelId;
+  }
+}
+
 interface ReplyOptions {
   target: string;
   message: string;
@@ -91,20 +111,7 @@ export async function reply(
       }
     }
 
-    // Try to get channel name for context
-    try {
-      const conv = await client.getConversationInfo(channelId);
-      if (conv.is_im && conv.user) {
-        const user = await client.getUserInfo(conv.user);
-        const displayName = user.display_name || user.real_name || user.name;
-        result.sent_to = `DM with @${displayName}`;
-      } else {
-        result.sent_to = conv.name || channelId;
-      }
-    } catch {
-      result.sent_to = channelId;
-    }
-
+    result.sent_to = await conversationLabel(client, channelId);
     return result;
   } catch (error) {
     const apiError = error as SlackAPIError;
