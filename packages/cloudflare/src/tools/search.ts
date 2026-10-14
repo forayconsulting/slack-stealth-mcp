@@ -5,6 +5,21 @@
 import { SlackClient } from "../slack-client";
 import { tsToDate } from "../types/slack";
 
+// Slack ID shapes: an uppercase prefix letter plus 8+ uppercase alphanumerics.
+// Plain names like "design", "general", or "will" never match.
+const CHANNEL_ID_RE = /^[CGD][A-Z0-9]{8,}$/;
+const USER_ID_RE = /^[UW][A-Z0-9]{8,}$/;
+
+/** Read the thread_ts query param from a search result permalink, if any. */
+function threadTsFromPermalink(permalink: string | undefined): string | null {
+  if (!permalink) return null;
+  try {
+    return new URL(permalink).searchParams.get("thread_ts") || null;
+  } catch {
+    return null;
+  }
+}
+
 interface SearchOptions {
   query: string;
   inChannel?: string;
@@ -22,6 +37,10 @@ interface FormattedMessage {
   user: string;
   text: string;
   time: string;
+  channel_id: string | null;
+  channel_name: string | null;
+  user_id: string | null;
+  permalink: string | null;
   thread_ts?: string;
   is_thread_reply?: boolean;
 }
@@ -59,9 +78,9 @@ export async function search(
   const queryParts: string[] = [query];
 
   if (inChannel) {
-    // Handle both channel name and ID
-    if (inChannel.startsWith("C") || inChannel.startsWith("G")) {
-      queryParts.push(`in:${inChannel}`);
+    // Channel/DM IDs need the <#ID> form; a bare in:ID matches nothing
+    if (CHANNEL_ID_RE.test(inChannel)) {
+      queryParts.push(`in:<#${inChannel}>`);
     } else if (inChannel.startsWith("@")) {
       queryParts.push(`in:${inChannel}`);
     } else {
@@ -70,7 +89,7 @@ export async function search(
   }
 
   if (fromUser) {
-    if (fromUser.startsWith("U")) {
+    if (USER_ID_RE.test(fromUser)) {
       queryParts.push(`from:<@${fromUser}>`);
     } else if (fromUser.startsWith("@")) {
       queryParts.push(`from:${fromUser}`);
@@ -126,11 +145,18 @@ export async function search(
       text:
         msg.text.length > 500 ? msg.text.substring(0, 500) + "..." : msg.text,
       time: tsToDate(msg.ts).toISOString().replace("T", " ").substring(0, 19),
+      // IDs from the search response itself; no extra API calls
+      channel_id: msg.channel?.id ?? null,
+      channel_name: msg.channel?.name ?? null,
+      user_id: msg.user ?? null,
+      permalink: msg.permalink ?? null,
     };
 
-    if (msg.thread_ts) {
-      formatted.thread_ts = msg.thread_ts;
-      formatted.is_thread_reply = msg.thread_ts !== msg.ts;
+    // Search matches can omit thread_ts on replies; the permalink keeps it
+    const threadTs = msg.thread_ts || threadTsFromPermalink(msg.permalink);
+    if (threadTs) {
+      formatted.thread_ts = threadTs;
+      formatted.is_thread_reply = threadTs !== msg.ts;
     }
 
     formattedMessages.push(formatted);

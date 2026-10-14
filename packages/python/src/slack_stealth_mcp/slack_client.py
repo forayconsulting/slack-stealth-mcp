@@ -901,6 +901,7 @@ class SlackClient:
             thread_ts=data.get("thread_ts"),
             reply_count=data.get("reply_count"),
             channel=channel,
+            permalink=data.get("permalink"),
             reactions=data.get("reactions", []),
             attachments=data.get("attachments", []),
             blocks=data.get("blocks", []),

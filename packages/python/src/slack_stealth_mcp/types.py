@@ -1,6 +1,6 @@
 """Pydantic models for Slack API responses and internal data structures."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -31,6 +31,7 @@ class SlackMessage(BaseModel):
     thread_ts: Optional[str] = None
     reply_count: Optional[int] = None
     channel: Optional[Dict[str, Any]] = None  # {id, name?} - present on search results
+    permalink: Optional[str] = None  # present on search results
     reactions: List[Dict[str, Any]] = Field(default_factory=list)
     attachments: List[Dict[str, Any]] = Field(default_factory=list)
     blocks: List[Dict[str, Any]] = Field(default_factory=list)
@@ -54,8 +55,8 @@ class SlackMessage(BaseModel):
 
     @property
     def timestamp(self) -> datetime:
-        """Convert Slack ts to datetime."""
-        return datetime.fromtimestamp(float(self.ts.split(".")[0]))
+        """Convert Slack ts to a UTC datetime (matches the Cloudflare port)."""
+        return datetime.fromtimestamp(float(self.ts.split(".")[0]), tz=timezone.utc)
 
 
 class SlackConversation(BaseModel):

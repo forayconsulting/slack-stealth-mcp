@@ -6,6 +6,9 @@ import { SlackClient } from "../slack-client";
 import { tsToDate, getConversationType } from "../types/slack";
 import { resolveChannelRef } from "../refs";
 
+// Slack's maximum page size for conversations.replies
+const THREAD_FETCH_LIMIT = 1000;
+
 interface GetContextOptions {
   channel: string;
   messageTs?: string;
@@ -17,6 +20,7 @@ interface FormattedMessage {
   user: string;
   text: string;
   time: string;
+  user_id: string | null;
   thread_ts?: string;
   is_reply?: boolean;
   reply_count?: number;
@@ -31,6 +35,8 @@ interface GetContextResult {
   message_count: number;
   is_thread?: boolean;
   thread_ts?: string;
+  total_thread_messages?: number;
+  omitted_replies?: number;
 }
 
 /**
@@ -54,19 +60,32 @@ export async function getContext(
   // Check if this is a thread request
   let isThread = false;
   let messages: Awaited<ReturnType<typeof client.getConversationHistory>> = [];
+  let totalThreadMessages = 0;
+  let omittedReplies = 0;
 
   if (messageTs) {
-    // Try to get thread replies first
+    // Try to get thread replies first. Fetch a full page (Slack's max for
+    // conversations.replies) so the newest replies aren't cut off.
     try {
       const threadMessages = await client.getThreadReplies(
         channel,
         messageTs,
-        contextSize
+        THREAD_FETCH_LIMIT
       );
       if (threadMessages.length > 1) {
-        // It's a thread with replies
+        // It's a thread with replies (root first, then oldest to newest)
         isThread = true;
-        messages = threadMessages;
+        totalThreadMessages = threadMessages.length;
+        if (totalThreadMessages > contextSize) {
+          // Keep the root plus the newest (contextSize - 1) replies
+          const keep = Math.max(contextSize - 1, 0);
+          const replies = threadMessages.slice(1);
+          const kept = keep ? replies.slice(replies.length - keep) : [];
+          omittedReplies = replies.length - kept.length;
+          messages = [threadMessages[0], ...kept];
+        } else {
+          messages = threadMessages;
+        }
       }
     } catch {
       // Not a thread or error - will fetch channel history
@@ -102,9 +121,11 @@ export async function getContext(
   }
 
   // Format messages - use cached user names
+  // History comes back newest first, so reverse it; threads are already
+  // oldest first with the root first.
+  const ordered = isThread ? messages : messages.slice().reverse();
   const formattedMessages: FormattedMessage[] = [];
-  for (const msg of messages.slice().reverse()) {
-    // Reverse to show oldest first
+  for (const msg of ordered) {
     let userName = "Unknown";
     if (msg.user) {
       const cached = client.getCachedUser(msg.user);
@@ -118,11 +139,16 @@ export async function getContext(
       user: userName,
       text: msg.text,
       time: tsToDate(msg.ts).toISOString().replace("T", " ").substring(0, 19),
+      user_id: msg.user ?? null,
     };
 
-    if (msg.thread_ts && msg.thread_ts !== msg.ts) {
-      formatted.thread_ts = msg.thread_ts;
-      formatted.is_reply = true;
+    // Every message in a thread carries the root ts, the root included
+    const threadTs = msg.thread_ts || (isThread ? messageTs : undefined);
+    if (threadTs) {
+      formatted.thread_ts = threadTs;
+      if (threadTs !== msg.ts) {
+        formatted.is_reply = true;
+      }
     }
 
     if (msg.reply_count) {
@@ -160,6 +186,10 @@ export async function getContext(
   if (isThread) {
     result.is_thread = true;
     result.thread_ts = messageTs;
+    result.total_thread_messages = totalThreadMessages;
+    if (omittedReplies > 0) {
+      result.omitted_replies = omittedReplies;
+    }
   }
 
   return result;

@@ -228,10 +228,12 @@ export SLACK_XOXD_COOKIE="xoxd-..."
 | `slack_list_scheduled` | List pending scheduled messages, including ones you scheduled in the Slack app |
 | `slack_cancel_scheduled` | Cancel a scheduled message before it sends |
 | `slack_react` | Add/remove emoji reactions to messages |
-| `slack_search` | Search with full Slack syntax (`in:`, `from:`, `has:`, date ranges) |
-| `slack_get_context` | Get conversation history for context (accepts a channel ID or a pasted Slack URL) |
+| `slack_search` | Search with full Slack syntax (`in:`, `from:`, `has:`, date ranges). `in_channel` takes a channel name or a channel, private channel, or DM ID. `from_user` takes a name or a `U...`/`W...` user ID. Each result includes `channel_id`, `channel_name`, `user_id`, and `permalink`. Thread replies also include `thread_ts` and `is_thread_reply`. |
+| `slack_get_context` | Get conversation history for context (accepts a channel ID or a pasted Slack URL). Messages come oldest first and include `user_id`. For a thread, the root comes first and every message carries `thread_ts`. A long thread returns the root plus the newest replies, and `omitted_replies` says how many were left out. |
 | `slack_list_conversations` | List all channels and DMs you have access to |
 | `slack_mark_read` | Explicitly mark conversations as read |
+
+> **Times:** every `time` field in tool output is UTC, in both the local and the remote server.
 
 > **Referring to conversations by name or URL:** Every tool that takes a `channel`/`target` also accepts a Slack link copied via "Copy link." To find something by name (a channel, a person, or the people in a group DM), use `slack_find_conversation` first—it returns ranked matches with IDs.
 

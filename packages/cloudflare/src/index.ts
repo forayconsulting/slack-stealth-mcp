@@ -47,7 +47,8 @@ export default new OAuthProvider({
   apiRoute: "/mcp",
 
   // MCP server handler (McpAgent router)
-  apiHandler: SlackMcpServer.serve("/mcp"),
+  // binding must match the SlackMcpServer DO name in wrangler.toml (default is MCP_OBJECT)
+  apiHandler: SlackMcpServer.serve("/mcp", { binding: "MCP_SESSION" }),
 
   // Handler for non-API routes (OAuth flow, health, etc.)
   defaultHandler,
