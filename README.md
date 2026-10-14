@@ -35,7 +35,7 @@ Slack Stealth MCP offers two deployment options depending on your needs:
 | **Best for** | Claude Desktop on Mac/PC | Claude Mobile (iOS/Android) |
 | **Setup complexity** | Medium (Python + Playwright) | Easy (just connect) |
 | **Where tokens live** | Your machine | Encrypted in Cloudflare KV |
-| **Authentication** | Local browser popup | Remote browser streaming |
+| **Authentication** | Local browser popup | Remote browser streaming, or a pasted token |
 | **Requires** | Python 3.10+, Playwright | Just a browser |
 
 ---
@@ -99,6 +99,16 @@ If your Slack login requires Google 2FA:
 4. Your session continues right where you left off
 
 Alternatively, tap **"Switch to desktop"** to get a QR code and finish authentication on your computer.
+
+### Signing In With a Pasted Token
+
+If Slack refuses the streamed browser (for example with "your browser is not supported"), tap **"Paste a token instead"** on the sign-in page.
+
+1. In a desktop browser where you are signed in to Slack, copy your `xoxc-` token and the value of the `d` cookie.
+2. Paste both into the form and tap **Connect with token**.
+3. The worker checks them with Slack's `auth.test`. If Slack accepts them, you are sent back to Claude. If not, you see the error and can try again.
+
+The `d` cookie can include the `d=` prefix and can be URL-encoded or not. The pasted values go only into your encrypted OAuth grant. They are not logged or kept anywhere else.
 
 ### Security
 

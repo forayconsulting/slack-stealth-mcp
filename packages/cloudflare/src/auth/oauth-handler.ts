@@ -77,6 +77,11 @@ export async function handleOAuthFlow(
     return handleAuthorize(request, env);
   }
 
+  // OAuth completion - pasted xoxc token + d cookie (alternative to the browser)
+  if (url.pathname === "/authorize/token" && request.method === "POST") {
+    return handleTokenLogin(request, env);
+  }
+
   // OAuth completion - after Slack login
   if (url.pathname === "/authorize/complete") {
     return handleAuthorizeComplete(request, env);
@@ -221,26 +226,7 @@ async function handleAuthorizeComplete(
     }
 
     // Complete the OAuth authorization
-    const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
-      request: session.authRequest,
-      // One grant label per Slack user; fall back to team-only if user_id is missing.
-      // No colons: workers-oauth-provider builds tokens as `${userId}:${grantId}:${secret}`
-      // and rejects any token that does not split into exactly 3 parts.
-      userId: result.tokens.user_id
-        ? `slack-${result.tokens.team_id}-${result.tokens.user_id}`
-        : `slack-${result.tokens.team_id}`,
-      metadata: {
-        teamName: result.tokens.team_name,
-        teamId: result.tokens.team_id,
-        userId: result.tokens.user_id,
-        authenticatedAt: new Date().toISOString(),
-      },
-      scope: session.authRequest.scope,
-      props: {
-        slackTokens: result.tokens,
-        authenticatedAt: new Date().toISOString(),
-      } satisfies OAuthProps,
-    });
+    const redirectTo = await completeGrant(env, session, result.tokens);
 
     // Clean up sessions
     await Promise.all([
@@ -254,6 +240,203 @@ async function handleAuthorizeComplete(
     console.error("Error completing authorization:", error);
     return new Response(`Error completing authorization: ${error}`, { status: 500 });
   }
+}
+
+/**
+ * Complete the OAuth grant with captured Slack tokens. Shared by the browser
+ * flow and the pasted-token flow so both produce the same props shape.
+ */
+async function completeGrant(
+  env: Env,
+  session: OAuthSession,
+  tokens: SlackTokens
+): Promise<string> {
+  const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
+    request: session.authRequest,
+    // One grant label per Slack user; fall back to team-only if user_id is missing.
+    // No colons: workers-oauth-provider builds tokens as `${userId}:${grantId}:${secret}`
+    // and rejects any token that does not split into exactly 3 parts.
+    userId: tokens.user_id
+      ? `slack-${tokens.team_id}-${tokens.user_id}`
+      : `slack-${tokens.team_id}`,
+    metadata: {
+      teamName: tokens.team_name,
+      teamId: tokens.team_id,
+      userId: tokens.user_id,
+      authenticatedAt: new Date().toISOString(),
+    },
+    scope: session.authRequest.scope,
+    props: {
+      slackTokens: tokens,
+      authenticatedAt: new Date().toISOString(),
+    } satisfies OAuthProps,
+  });
+  return redirectTo;
+}
+
+/** Trim whitespace and one pair of surrounding quotes. */
+function stripQuotes(raw: string): string {
+  const value = raw.trim();
+  const quoted = /^(["'])(.*)\1$/.exec(value);
+  return (quoted ? quoted[2] : value).trim();
+}
+
+/**
+ * Normalize a pasted d cookie to the form Slack's cookie jar stores
+ * (URL-encoded), which is what the browser flow captures and what
+ * SlackClient sends. Accepts "d=" prefixes, a trailing ";", and values that
+ * are already encoded or not.
+ */
+function normalizeDCookie(raw: string): string {
+  let value = stripQuotes(raw);
+  if (value.toLowerCase().startsWith("d=")) {
+    value = value.slice(2);
+  }
+  // A pasted cookie header may carry more cookies after the first ";"
+  value = stripQuotes(value.split(";")[0]);
+  // Already-encoded values contain %XX escapes; leave them alone
+  if (/%[0-9A-Fa-f]{2}/.test(value)) {
+    return value;
+  }
+  return encodeURIComponent(value);
+}
+
+/**
+ * auth.test with a pasted token + cookie (read-only, no read receipts).
+ * Returns the identity fields the grant needs, or a Slack error code.
+ */
+async function slackAuthTest(
+  xoxcToken: string,
+  xoxdCookie: string
+): Promise<
+  | { ok: true; team_id: string; team_name: string; user_id: string }
+  | { ok: false; error: string }
+> {
+  try {
+    const response = await fetch("https://slack.com/api/auth.test", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${xoxcToken}`,
+        Cookie: `d=${xoxdCookie}`,
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    const data = (await response.json()) as {
+      ok?: boolean;
+      error?: string;
+      team_id?: string;
+      team?: string;
+      user_id?: string;
+    };
+    if (!data.ok || !data.team_id || !data.user_id) {
+      return { ok: false, error: data.error || "unexpected_response" };
+    }
+    return {
+      ok: true,
+      team_id: data.team_id,
+      team_name: data.team || data.team_id,
+      user_id: data.user_id,
+    };
+  } catch {
+    // Don't log the error: fetch errors never carry headers, but keep this
+    // path free of anything derived from the pasted values.
+    return { ok: false, error: "network_error" };
+  }
+}
+
+/** Plain-language text for Slack auth.test error codes. */
+function tokenLoginErrorText(code: string): string {
+  switch (code) {
+    case "invalid_auth":
+    case "not_authed":
+      return "Slack rejected the token or cookie (" + code + "). Check that both values come from the same signed-in browser session and try again.";
+    case "account_inactive":
+    case "token_revoked":
+    case "token_expired":
+      return "That Slack session is no longer valid (" + code + "). Sign in to Slack again in your browser, copy fresh values, and try again.";
+    case "network_error":
+      return "Could not reach Slack. Try again.";
+    default:
+      return "Slack could not verify those values (" + code + "). Try again.";
+  }
+}
+
+/**
+ * Handle the pasted-token sign-in form (POST /authorize/token).
+ * Uses the same OAuth session check as /authorize/complete. The pasted values
+ * are never logged, echoed, or written to KV; they go only into grant props.
+ */
+async function handleTokenLogin(request: Request, env: Env): Promise<Response> {
+  const noStore = { "Cache-Control": "no-store" };
+
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch {
+    return new Response("Invalid form submission", { status: 400, headers: noStore });
+  }
+
+  const oauthSessionId = String(form.get("oauth") || "");
+  if (!oauthSessionId) {
+    return new Response("Missing oauth session ID", { status: 400, headers: noStore });
+  }
+
+  // Same OAuth state check as the browser flow
+  const sessionJson = await env.SESSIONS.get(`oauth:${oauthSessionId}`);
+  if (!sessionJson) {
+    return new Response("OAuth session expired or not found", { status: 400, headers: noStore });
+  }
+  const session: OAuthSession = JSON.parse(sessionJson);
+
+  const renderError = (message: string) =>
+    new Response(renderAuthorizePage(oauthSessionId, session.authRequest, message), {
+      status: 400,
+      headers: { "Content-Type": "text/html", ...noStore },
+    });
+
+  const xoxcToken = stripQuotes(String(form.get("xoxc") || ""));
+  const xoxdCookie = normalizeDCookie(String(form.get("d") || ""));
+
+  if (!xoxcToken.startsWith("xoxc-")) {
+    return renderError("The token should start with xoxc-. Check the value and try again.");
+  }
+  if (!xoxdCookie) {
+    return renderError("The d cookie is empty. Paste its value and try again.");
+  }
+
+  const auth = await slackAuthTest(xoxcToken, xoxdCookie);
+  if (!auth.ok) {
+    return renderError(tokenLoginErrorText(auth.error));
+  }
+
+  try {
+    const redirectTo = await completeGrant(env, session, {
+      xoxc_token: xoxcToken,
+      xoxd_cookie: xoxdCookie,
+      team_id: auth.team_id,
+      team_name: auth.team_name,
+      user_id: auth.user_id,
+    });
+
+    // Same cleanup as the browser flow. The pasted values were never written
+    // to KV, so only the OAuth session entry remains.
+    await env.SESSIONS.delete(`oauth:${oauthSessionId}`);
+
+    return Response.redirect(redirectTo, 302);
+  } catch (error) {
+    console.error("Error completing token authorization:", error);
+    return renderError("Could not complete authorization. Try again.");
+  }
+}
+
+/** Escape text for safe insertion into HTML. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /**
@@ -391,7 +574,14 @@ async function handleAuthResult(
 /**
  * Render the OAuth authorization page with embedded browser auth
  */
-function renderAuthorizePage(oauthSessionId: string, authRequest: AuthRequest): string {
+function renderAuthorizePage(
+  oauthSessionId: string,
+  authRequest: AuthRequest,
+  tokenError?: string
+): string {
+  const tokenErrorHtml = tokenError
+    ? `<div class="token-error" role="alert">${escapeHtml(tokenError)}</div>`
+    : "";
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -503,6 +693,75 @@ function renderAuthorizePage(oauthSessionId: string, authRequest: AuthRequest): 
     }
 
     .start-screen.hidden { display: none; }
+
+    /* Pasted-token sign-in (alternative to the streamed browser) */
+    .start-screen { overflow-y: auto; justify-content: safe center; }
+
+    .token-toggle {
+      margin-top: 20px;
+      background: none;
+      border: none;
+      color: var(--slack-blue);
+      font-size: 15px;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+
+    .token-form {
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      width: 100%;
+      max-width: 360px;
+      margin-top: 20px;
+      text-align: left;
+    }
+
+    .token-form.active { display: flex; }
+
+    .token-form label {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .token-form input {
+      width: 100%;
+      padding: 12px;
+      font-size: 15px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface-raised);
+      color: var(--text-primary);
+      font-family: ui-monospace, Menlo, monospace;
+    }
+
+    .token-form .hint {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.4;
+    }
+
+    .token-form button {
+      margin-top: 8px;
+      background: var(--slack-green);
+      color: #fff;
+      border: none;
+      padding: 14px;
+      font-size: 16px;
+      font-weight: 600;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    .token-error {
+      background: rgba(224, 30, 90, 0.15);
+      border: 1px solid var(--slack-red);
+      color: #fff;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 14px;
+      line-height: 1.4;
+    }
 
     .start-icon {
       width: 80px;
@@ -836,6 +1095,18 @@ function renderAuthorizePage(oauthSessionId: string, authRequest: AuthRequest): 
       </div>
       <p>Sign in to Slack in the secure browser below. Your session tokens will be encrypted and stored safely.</p>
       <button id="start-btn" class="start-btn">Sign in to Slack</button>
+
+      <button id="token-toggle" class="token-toggle" type="button">Paste a token instead</button>
+      <form id="token-form" class="token-form${tokenError ? " active" : ""}" method="POST" action="/authorize/token" autocomplete="off">
+        ${tokenErrorHtml}
+        <input type="hidden" name="oauth" value="${escapeHtml(oauthSessionId)}">
+        <label for="xoxc">xoxc token</label>
+        <input id="xoxc" name="xoxc" type="password" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="xoxc-...">
+        <label for="d">d cookie</label>
+        <input id="d" name="d" type="password" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="xoxd-...">
+        <p class="hint">Copy both from a desktop browser where you are signed in to Slack. The d cookie can include the "d=" prefix and can be URL-encoded or not.</p>
+        <button type="submit">Connect with token</button>
+      </form>
     </div>
 
     <div id="browser-container" class="browser-container">
@@ -1412,6 +1683,16 @@ function renderAuthorizePage(oauthSessionId: string, authRequest: AuthRequest): 
     });
 
     startBtn.addEventListener('click', startAuth);
+
+    // Pasted-token form toggle (the form itself posts without JavaScript)
+    const tokenToggle = document.getElementById('token-toggle');
+    const tokenForm = document.getElementById('token-form');
+    tokenToggle.addEventListener('click', () => {
+      tokenForm.classList.toggle('active');
+      if (tokenForm.classList.contains('active')) {
+        document.getElementById('xoxc').focus();
+      }
+    });
 
     // On page load, check for saved session (user returning from 2FA)
     document.addEventListener('DOMContentLoaded', () => {
