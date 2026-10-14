@@ -16,6 +16,8 @@ export interface SlackTokens {
   xoxd_cookie: string;
   team_id: string;
   team_name: string;
+  /** Slack user ID from auth.test. Absent on grants issued before it was captured. */
+  user_id?: string;
 }
 
 /**
@@ -221,10 +223,16 @@ async function handleAuthorizeComplete(
     // Complete the OAuth authorization
     const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
       request: session.authRequest,
-      userId: `slack:${result.tokens.team_id}`, // Use team_id as user identifier
+      // One grant label per Slack user; fall back to team-only if user_id is missing.
+      // No colons: workers-oauth-provider builds tokens as `${userId}:${grantId}:${secret}`
+      // and rejects any token that does not split into exactly 3 parts.
+      userId: result.tokens.user_id
+        ? `slack-${result.tokens.team_id}-${result.tokens.user_id}`
+        : `slack-${result.tokens.team_id}`,
       metadata: {
         teamName: result.tokens.team_name,
         teamId: result.tokens.team_id,
+        userId: result.tokens.user_id,
         authenticatedAt: new Date().toISOString(),
       },
       scope: session.authRequest.scope,

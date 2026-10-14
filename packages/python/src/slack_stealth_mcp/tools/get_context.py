@@ -7,6 +7,9 @@ from typing import Any
 from ..refs import resolve_channel_ref
 from ..workspace import WorkspaceManager
 
+# Slack's maximum page size for conversations.replies
+THREAD_FETCH_LIMIT = 1000
+
 
 async def get_context(
     manager: WorkspaceManager,
@@ -43,19 +46,31 @@ async def get_context(
     # Check if this is a thread request (message_ts points to a thread parent)
     is_thread = False
     messages = []
+    total_thread_messages = 0
+    omitted_replies = 0
 
     if message_ts:
-        # Try to get thread replies first
+        # Try to get thread replies first. Fetch a full page (Slack's max for
+        # conversations.replies) so the newest replies aren't cut off.
         try:
             thread_messages = await client.get_thread_replies(
                 channel=channel,
                 thread_ts=message_ts,
-                limit=context_size,
+                limit=THREAD_FETCH_LIMIT,
             )
             if len(thread_messages) > 1:
-                # It's a thread with replies
+                # It's a thread with replies (root first, then oldest to newest)
                 is_thread = True
-                messages = thread_messages
+                total_thread_messages = len(thread_messages)
+                if total_thread_messages > context_size:
+                    # Keep the root plus the newest (context_size - 1) replies
+                    keep = max(context_size - 1, 0)
+                    replies = thread_messages[1:]
+                    kept = replies[len(replies) - keep:] if keep else []
+                    omitted_replies = len(replies) - len(kept)
+                    messages = [thread_messages[0]] + kept
+                else:
+                    messages = thread_messages
         except Exception:
             pass
 
@@ -87,8 +102,11 @@ async def get_context(
             )
 
     # Format messages - use cached user names to avoid N API calls
+    # History comes back newest first, so reverse it; threads are already
+    # oldest first with the root first.
+    ordered = messages if is_thread else list(reversed(messages))
     formatted_messages = []
-    for msg in reversed(messages):  # Reverse to show oldest first
+    for msg in ordered:
         user_name = "Unknown"
         if msg.user:
             cached = client._users_cache.get(msg.user)
@@ -99,18 +117,23 @@ async def get_context(
             "user": user_name,
             "text": msg.text,
             "time": msg.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            "user_id": msg.user,
         }
 
-        if msg.thread_ts and msg.thread_ts != msg.ts:
-            formatted["thread_ts"] = msg.thread_ts
-            formatted["is_reply"] = True
+        # Every message in a thread carries the root ts, the root included
+        thread_ts = msg.thread_ts or (message_ts if is_thread else None)
+        if thread_ts:
+            formatted["thread_ts"] = thread_ts
+            if thread_ts != msg.ts:
+                formatted["is_reply"] = True
 
         if msg.reply_count:
             formatted["reply_count"] = msg.reply_count
 
         if msg.reactions:
             formatted["reactions"] = [
-                f":{r['name']}:{r.get('count', 1)}" for r in msg.reactions
+                f":{r['name']}:{r['count'] if r.get('count', 1) > 1 else ''}"
+                for r in msg.reactions
             ]
 
         formatted_messages.append(formatted)
@@ -135,5 +158,8 @@ async def get_context(
     if is_thread:
         result["is_thread"] = True
         result["thread_ts"] = message_ts
+        result["total_thread_messages"] = total_thread_messages
+        if omitted_replies > 0:
+            result["omitted_replies"] = omitted_replies
 
     return result

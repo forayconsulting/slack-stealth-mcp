@@ -20,8 +20,34 @@ interface BrowserAuthResult {
     xoxd_cookie: string;
     team_id: string;
     team_name: string;
+    user_id?: string;
   };
   error?: string;
+}
+
+/**
+ * Look up the signed-in Slack user ID with auth.test (read-only, no read
+ * receipts). Returns undefined on any failure so login never depends on it.
+ */
+async function fetchSlackUserId(
+  xoxcToken: string,
+  xoxdCookie: string
+): Promise<string | undefined> {
+  try {
+    const response = await fetch("https://slack.com/api/auth.test", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${xoxcToken}`,
+        Cookie: `d=${xoxdCookie}`,
+      },
+      signal: AbortSignal.timeout(5000),
+    });
+    const data = (await response.json()) as { ok?: boolean; user_id?: string };
+    return data.ok && data.user_id ? data.user_id : undefined;
+  } catch (error) {
+    console.error("auth.test lookup failed:", error);
+    return undefined;
+  }
 }
 
 // Message types for WebSocket communication
@@ -494,6 +520,9 @@ export class BrowserAuthSession {
       const pageTitle = await this.page.title();
       const teamName = pageTitle.replace(" | Slack", "").trim() || teamId;
 
+      // Get the signed-in user's ID so each user gets their own grant
+      const userId = await fetchSlackUserId(xoxcToken, xoxdCookie.value);
+
       // Store tokens temporarily in SESSIONS KV for OAuth flow
       // The OAuth handler will retrieve these and put them in the access token props
       const result: BrowserAuthResult = {
@@ -503,6 +532,7 @@ export class BrowserAuthSession {
           xoxd_cookie: xoxdCookie.value,
           team_id: teamId,
           team_name: teamName,
+          ...(userId ? { user_id: userId } : {}),
         },
       };
       await this.env.SESSIONS.put(
