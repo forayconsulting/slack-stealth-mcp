@@ -238,6 +238,8 @@ export SLACK_XOXD_COOKIE="xoxd-..."
 | `slack_list_scheduled` | List pending scheduled messages, including ones you scheduled in the Slack app |
 | `slack_cancel_scheduled` | Cancel a scheduled message before it sends |
 | `slack_react` | Add/remove emoji reactions to messages |
+| `slack_upload_file` | Upload a file to a channel, DM, or thread, with an optional message. The local server reads a file path. Both servers accept text or base64 content plus a filename. Limit: 100 MB local, 25 MB remote. |
+| `slack_create_channel` | Create a public or private channel. Optionally set its description and topic and invite people by user ID. The name is converted to Slack's form (`Q4 Planning` becomes `q4-planning`). |
 | `slack_search` | Search with full Slack syntax (`in:`, `from:`, `has:`, date ranges). `in_channel` takes a channel name or a channel, private channel, or DM ID. `from_user` takes a name or a `U...`/`W...` user ID. Each result includes `channel_id`, `channel_name`, `user_id`, and `permalink`. Thread replies also include `thread_ts` and `is_thread_reply`. |
 | `slack_get_context` | Get conversation history for context (accepts a channel ID or a pasted Slack URL). Messages come oldest first and include `user_id`. For a thread, the root comes first and every message carries `thread_ts`. A long thread returns the root plus the newest replies, and `omitted_replies` says how many were left out. |
 | `slack_list_conversations` | List all channels and DMs you have access to |
@@ -281,6 +283,12 @@ export SLACK_XOXD_COOKIE="xoxd-..."
 "What messages do I have scheduled?"
 → Uses slack_list_scheduled
 
+"Share ~/Desktop/report.pdf in #finance with a short note"
+→ Uses slack_find_conversation, then slack_upload_file
+
+"Create a private channel called project-atlas and invite Alice and Bob"
+→ Uses slack_find_conversation for their user IDs, then slack_create_channel
+
 "React to that message with a thumbs up"
 → Uses slack_react to add :+1: reaction
 
@@ -308,6 +316,7 @@ One of the key benefits of Slack Stealth MCP is **silent reading**:
 | `slack_get_context` | No | No |
 | `slack_reply` | No | No |
 | `slack_react` | No | No |
+| `slack_upload_file` / `slack_create_channel` | No | No |
 | `slack_schedule_message` / `slack_list_scheduled` / `slack_cancel_scheduled` | No | No |
 | `slack_list_conversations` | No | No |
 | `slack_mark_read` | **Yes** | No |

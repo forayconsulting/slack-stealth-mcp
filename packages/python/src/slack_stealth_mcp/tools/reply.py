@@ -22,6 +22,32 @@ async def conversation_label(client: SlackClient, channel_id: str) -> str:
         return channel_id
 
 
+async def resolve_send_target(
+    client: SlackClient, target: str, thread_ts: str | None = None
+) -> tuple[str, str | None]:
+    """Turn a send target into (channel_id, thread_ts).
+
+    Accepts the same targets as slack_reply: C/D/G IDs, U/W user IDs (opens
+    the DM), or Slack URLs. A message URL implies a thread reply unless the
+    caller passed thread_ts.
+
+    Raises:
+        ValueError: with a message suitable for the tool's error field
+    """
+    ref = resolve_channel_ref(target)
+    channel_id = ref.channel_id
+    if ref.message_ts and not thread_ts:
+        thread_ts = ref.message_ts
+
+    if channel_id.startswith(("U", "W")):
+        try:
+            channel_id = await client.open_conversation([channel_id])
+        except SlackAPIError as e:
+            raise ValueError(f"Failed to open DM with user {channel_id}: {e.error}") from e
+
+    return channel_id, thread_ts
+
+
 async def reply(
     manager: WorkspaceManager,
     target: str,
@@ -52,26 +78,11 @@ async def reply(
     """
     client = manager.get_client(workspace)
 
-    # Resolve URLs/raw IDs to a channel ID
+    # Resolve URLs/raw IDs/user IDs to a channel ID (and thread from a URL)
     try:
-        ref = resolve_channel_ref(target)
+        channel_id, thread_ts = await resolve_send_target(client, target, thread_ts)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
-
-    channel_id = ref.channel_id
-    # A message URL implies a thread reply unless the caller said otherwise
-    if ref.message_ts and not thread_ts:
-        thread_ts = ref.message_ts
-
-    # If target is a user ID, open/get DM channel
-    if channel_id.startswith(("U", "W")):
-        try:
-            channel_id = await client.open_conversation([channel_id])
-        except SlackAPIError as e:
-            return {
-                "ok": False,
-                "error": f"Failed to open DM with user {channel_id}: {e.error}",
-            }
 
     # Convert any stray Markdown to Slack mrkdwn
     message = normalize_mrkdwn(message)

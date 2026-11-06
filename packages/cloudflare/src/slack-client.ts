@@ -432,6 +432,46 @@ export class SlackClient {
     this.lastReadCache.set(channel, ts);
   }
 
+  /**
+   * Create a public or private channel. The creator joins it.
+   */
+  async createConversation(name: string, isPrivate: boolean = false): Promise<SlackConversation> {
+    const response = await this.request<{ channel: Record<string, unknown> }>(
+      "POST",
+      "conversations.create",
+      { data: { name, is_private: isPrivate } }
+    );
+    const conv = this.parseConversation(response.channel);
+    this.conversationsCache.set(conv.id, conv);
+    return conv;
+  }
+
+  /**
+   * Invite users to a channel. force=true makes Slack invite the valid IDs
+   * even when some fail. Returns the per-user errors Slack reported.
+   */
+  async inviteToConversation(
+    channel: string,
+    users: string[]
+  ): Promise<Array<{ user?: string; error?: string }>> {
+    const response = await this.request<{ errors?: Array<{ user?: string; error?: string }> }>(
+      "POST",
+      "conversations.invite",
+      { data: { channel, users: users.join(","), force: true } }
+    );
+    return response.errors ?? [];
+  }
+
+  /** Set a channel's description (Slack calls it the purpose). */
+  async setConversationPurpose(channel: string, purpose: string): Promise<void> {
+    await this.request("POST", "conversations.setPurpose", { data: { channel, purpose } });
+  }
+
+  /** Set a channel's topic. */
+  async setConversationTopic(channel: string, topic: string): Promise<void> {
+    await this.request("POST", "conversations.setTopic", { data: { channel, topic } });
+  }
+
   // =========================================================================
   // Messages API
   // =========================================================================
@@ -468,6 +508,53 @@ export class SlackClient {
     }>("POST", "chat.postMessage", { data });
 
     return this.parseMessage(response.message);
+  }
+
+  // =========================================================================
+  // Files API (external upload flow)
+  // =========================================================================
+
+  /**
+   * Upload a file and share it to a conversation.
+   *
+   * Slack's three-step flow: files.getUploadURLExternal reserves a file ID
+   * and a signed upload URL, the bytes go to that URL, then
+   * files.completeUploadExternal shares the file to the channel.
+   */
+  async uploadFile(
+    content: Uint8Array,
+    filename: string,
+    channel: string,
+    options: { title?: string; initialComment?: string; threadTs?: string } = {}
+  ): Promise<Record<string, unknown>> {
+    const reserved = await this.request<{ upload_url: string; file_id: string }>(
+      "POST",
+      "files.getUploadURLExternal",
+      { data: { filename, length: content.byteLength } }
+    );
+
+    // The signed URL carries its own authorization, so no Slack headers here
+    await this.rateLimiter.acquire();
+    const form = new FormData();
+    form.append("file", new Blob([content]), filename);
+    const uploadResponse = await fetch(reserved.upload_url, { method: "POST", body: form });
+    if (uploadResponse.status !== 200) {
+      throw new SlackAPIError(`upload_failed_http_${uploadResponse.status}`);
+    }
+
+    const data: Record<string, string | number | boolean> = {
+      files: JSON.stringify([{ id: reserved.file_id, title: options.title || filename }]),
+      channel_id: channel,
+    };
+    if (options.initialComment) data.initial_comment = options.initialComment;
+    if (options.threadTs) data.thread_ts = options.threadTs;
+
+    const response = await this.request<{ files?: Record<string, unknown>[] }>(
+      "POST",
+      "files.completeUploadExternal",
+      { data }
+    );
+    return response.files?.[0] ?? { id: reserved.file_id };
   }
 
   // =========================================================================

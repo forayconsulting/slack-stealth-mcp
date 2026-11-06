@@ -26,6 +26,39 @@ export async function conversationLabel(
   }
 }
 
+/**
+ * Turn a send target into { channelId, threadTs }.
+ *
+ * Accepts the same targets as slack_reply: C/D/G IDs, U/W user IDs (opens
+ * the DM), or Slack URLs. A message URL implies a thread reply unless the
+ * caller passed threadTs. Throws an Error whose message suits the tool's
+ * error field.
+ */
+export async function resolveSendTarget(
+  client: SlackClient,
+  target: string,
+  threadTs?: string
+): Promise<{ channelId: string; threadTs?: string }> {
+  const ref = resolveChannelRef(target);
+  let channelId = ref.channelId;
+  if (ref.messageTs && !threadTs) {
+    threadTs = ref.messageTs;
+  }
+
+  if (channelId.startsWith("U") || channelId.startsWith("W")) {
+    try {
+      channelId = await client.openConversation([channelId]);
+    } catch (error) {
+      const apiError = error as SlackAPIError;
+      throw new Error(
+        `Failed to open DM with user ${channelId}: ${apiError.error || apiError.message}`
+      );
+    }
+  }
+
+  return { channelId, threadTs };
+}
+
 interface ReplyOptions {
   target: string;
   message: string;
@@ -56,33 +89,15 @@ export async function reply(
   const { target, message, broadcast = false } = options;
   let { threadTs } = options;
 
-  // Resolve URLs/raw IDs to a channel ID
+  // Resolve URLs/raw IDs/user IDs to a channel ID (and thread from a URL)
   let channelId: string;
   try {
-    const ref = resolveChannelRef(target);
-    channelId = ref.channelId;
-    // A message URL implies a thread reply unless the caller said otherwise
-    if (ref.messageTs && !threadTs) {
-      threadTs = ref.messageTs;
-    }
+    ({ channelId, threadTs } = await resolveSendTarget(client, target, threadTs));
   } catch (error) {
     return {
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     };
-  }
-
-  // If target is a user ID, open/get DM channel
-  if (channelId.startsWith("U") || channelId.startsWith("W")) {
-    try {
-      channelId = await client.openConversation([channelId]);
-    } catch (error) {
-      const apiError = error as SlackAPIError;
-      return {
-        ok: false,
-        error: `Failed to open DM with user ${channelId}: ${apiError.error || apiError.message}`,
-      };
-    }
   }
 
   // Send the message

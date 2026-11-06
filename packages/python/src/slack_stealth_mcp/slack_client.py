@@ -471,6 +471,58 @@ class SlackClient:
         )
         self._last_read_cache[channel] = ts
 
+    async def create_conversation(self, name: str, is_private: bool = False) -> SlackConversation:
+        """Create a public or private channel. The creator joins it.
+
+        Args:
+            name: Channel name, already in Slack's form (lowercase, no spaces)
+            is_private: Create a private channel instead of a public one
+
+        Returns:
+            The new channel
+        """
+        data = await self._request(
+            "POST",
+            "conversations.create",
+            data={"name": name, "is_private": "true" if is_private else "false"},
+        )
+        conv = self._parse_conversation(data["channel"])
+        self._conversations_cache[conv.id] = conv
+        return conv
+
+    async def invite_to_conversation(
+        self, channel: str, users: List[str]
+    ) -> List[Dict[str, Any]]:
+        """Invite users to a channel.
+
+        force=true makes Slack invite the valid IDs even when some fail.
+
+        Returns:
+            Per-user errors Slack reported (empty when everyone was invited)
+        """
+        data = await self._request(
+            "POST",
+            "conversations.invite",
+            data={"channel": channel, "users": ",".join(users), "force": "true"},
+        )
+        return data.get("errors", [])
+
+    async def set_conversation_purpose(self, channel: str, purpose: str) -> None:
+        """Set a channel's description (Slack calls it the purpose)."""
+        await self._request(
+            "POST",
+            "conversations.setPurpose",
+            data={"channel": channel, "purpose": purpose},
+        )
+
+    async def set_conversation_topic(self, channel: str, topic: str) -> None:
+        """Set a channel's topic."""
+        await self._request(
+            "POST",
+            "conversations.setTopic",
+            data={"channel": channel, "topic": topic},
+        )
+
     # =========================================================================
     # Messages API
     # =========================================================================
@@ -509,6 +561,70 @@ class SlackClient:
 
         data = await self._request("POST", "chat.postMessage", data=payload)
         return self._parse_message(data["message"])
+
+    # =========================================================================
+    # Files API (external upload flow)
+    # =========================================================================
+
+    async def upload_file(
+        self,
+        content: bytes,
+        filename: str,
+        channel: str,
+        title: Optional[str] = None,
+        initial_comment: Optional[str] = None,
+        thread_ts: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Upload a file and share it to a conversation.
+
+        Slack's three-step flow: files.getUploadURLExternal reserves a file ID
+        and a signed upload URL, the bytes go to that URL, then
+        files.completeUploadExternal shares the file to the channel.
+
+        Args:
+            content: File bytes
+            filename: Name Slack shows and uses to detect the file type
+            channel: Channel ID (C/D/G - not a user ID)
+            title: Optional title (defaults to filename)
+            initial_comment: Optional message posted with the file (mrkdwn)
+            thread_ts: Parent message ts to share into a thread
+
+        Returns:
+            The completed file object (id, name, permalink, ...)
+        """
+        reserved = await self._request(
+            "POST",
+            "files.getUploadURLExternal",
+            data={"filename": filename, "length": str(len(content))},
+        )
+        await self._send_upload_bytes(reserved["upload_url"], content, filename)
+
+        payload: Dict[str, Any] = {
+            "files": json.dumps([{"id": reserved["file_id"], "title": title or filename}]),
+            "channel_id": channel,
+        }
+        if initial_comment:
+            payload["initial_comment"] = initial_comment
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
+
+        data = await self._request("POST", "files.completeUploadExternal", data=payload)
+        files = data.get("files") or [{"id": reserved["file_id"]}]
+        return files[0]
+
+    async def _send_upload_bytes(self, upload_url: str, content: bytes, filename: str) -> None:
+        """POST file bytes to the signed URL from files.getUploadURLExternal.
+
+        The URL carries its own authorization, so this skips the API client's
+        headers and base URL. Kept separate so tests can stub it.
+        """
+        await self._rate_limiter.acquire()
+        async with httpx.AsyncClient(timeout=120.0) as upload_client:
+            response = await upload_client.post(
+                upload_url, files={"file": (filename, content)}
+            )
+        if response.status_code != 200:
+            raise SlackAPIError(f"upload_failed_http_{response.status_code}")
 
     # =========================================================================
     # Drafts API (internal; backs Slack's "Schedule for later")
