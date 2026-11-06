@@ -15,6 +15,7 @@ from .tools import (
     auth_login,
     auth_status,
     cancel_scheduled,
+    create_channel,
     find_conversation,
     get_context,
     get_unread,
@@ -25,6 +26,7 @@ from .tools import (
     reply,
     schedule_message,
     search,
+    upload_file,
 )
 from .workspace import WorkspaceManager
 
@@ -551,6 +553,114 @@ IMPORTANT: This does NOT mark messages as read.""",
             "required": ["channel", "message_ts", "emoji"],
         },
     ),
+    Tool(
+        name="slack_upload_file",
+        description="""Upload a file to a Slack channel, DM, or thread.
+
+Give exactly one content source:
+- file_path: a file on this computer (~ is expanded). Best for anything
+  binary or large, such as PDFs, images, and spreadsheets.
+- content: text to upload as a file (CSV, code, logs, notes).
+  Requires filename.
+- content_base64: base64-encoded bytes. Requires filename.
+
+Slack picks the file type from the filename extension. Max 100 MB.
+
+Targets work the same as slack_reply: channel/DM IDs, a user ID (opens the
+DM), or a pasted Slack URL (a message URL puts the file in that thread).
+The optional message is posted with the file. Write it in Slack mrkdwn.
+
+IMPORTANT: This does NOT mark the channel as read.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "Channel ID (C...), User ID (U...), DM ID (D...), or Slack URL",
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to a local file to upload",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Text content to upload as a file (needs filename)",
+                },
+                "content_base64": {
+                    "type": "string",
+                    "description": "Base64-encoded file bytes (needs filename)",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "File name with extension, e.g. report.csv (defaults to file_path's name)",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Title shown in Slack (defaults to filename)",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Message posted with the file, in Slack mrkdwn",
+                },
+                "thread_ts": {
+                    "type": "string",
+                    "description": "Parent message timestamp to upload into a thread",
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace name (uses default if not specified)",
+                },
+            },
+            "required": ["target"],
+        },
+    ),
+    Tool(
+        name="slack_create_channel",
+        description="""Create a new Slack channel. You join it as its creator.
+
+The name is converted to Slack's form: lowercase, spaces become hyphens,
+and other punctuation is dropped ("Q4 Planning" becomes q4-planning).
+The result shows the final name.
+
+Optionally set a description and topic, and invite people by user ID
+(use slack_find_conversation to look up IDs). If a later step fails, the
+channel still exists and the problem is listed in "warnings".
+
+Confirm the name and public/private choice with the user before creating:
+channels cannot be deleted through this server.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Channel name (max 80 chars after conversion)",
+                },
+                "is_private": {
+                    "type": "boolean",
+                    "description": "Create a private channel (default: false)",
+                    "default": False,
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Channel description (what the channel is for)",
+                },
+                "topic": {
+                    "type": "string",
+                    "description": "Channel topic",
+                },
+                "invite": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "User IDs (U...) to invite",
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace name (uses default if not specified)",
+                },
+            },
+            "required": ["name"],
+        },
+    ),
 ]
 
 
@@ -684,6 +794,31 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 message_ts=arguments["message_ts"],
                 emoji=arguments["emoji"],
                 remove=arguments.get("remove", False),
+                workspace=arguments.get("workspace"),
+            )
+
+        elif name == "slack_upload_file":
+            result = await upload_file(
+                manager=manager,
+                target=arguments["target"],
+                file_path=arguments.get("file_path"),
+                content=arguments.get("content"),
+                content_base64=arguments.get("content_base64"),
+                filename=arguments.get("filename"),
+                title=arguments.get("title"),
+                message=arguments.get("message"),
+                thread_ts=arguments.get("thread_ts"),
+                workspace=arguments.get("workspace"),
+            )
+
+        elif name == "slack_create_channel":
+            result = await create_channel(
+                manager=manager,
+                name=arguments["name"],
+                is_private=arguments.get("is_private", False),
+                description=arguments.get("description"),
+                topic=arguments.get("topic"),
+                invite=arguments.get("invite"),
                 workspace=arguments.get("workspace"),
             )
 

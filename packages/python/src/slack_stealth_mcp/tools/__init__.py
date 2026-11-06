@@ -1,6 +1,7 @@
 """MCP tools for Slack operations."""
 
 from .auth import auth_login, auth_status
+from .create_channel import create_channel
 from .find_conversation import find_conversation
 from .get_context import get_context
 from .get_unread import get_unread
@@ -10,11 +11,13 @@ from .react import react
 from .reply import reply
 from .schedule import cancel_scheduled, list_scheduled, schedule_message
 from .search import search
+from .upload_file import upload_file
 
 __all__ = [
     "auth_login",
     "auth_status",
     "cancel_scheduled",
+    "create_channel",
     "find_conversation",
     "get_context",
     "get_unread",
@@ -25,4 +28,5 @@ __all__ = [
     "reply",
     "schedule_message",
     "search",
+    "upload_file",
 ]

@@ -10,3 +10,5 @@ export { listConversations } from "./list-conversations";
 export { markRead } from "./mark-read";
 export { react } from "./react";
 export { scheduleMessage, listScheduled, cancelScheduled } from "./schedule";
+export { createChannel } from "./create-channel";
+export { uploadFile } from "./upload-file";

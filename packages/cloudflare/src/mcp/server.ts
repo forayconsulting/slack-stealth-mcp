@@ -23,6 +23,8 @@ import { listConversations } from "../tools/list-conversations";
 import { markRead } from "../tools/mark-read";
 import { react } from "../tools/react";
 import { scheduleMessage, listScheduled, cancelScheduled } from "../tools/schedule";
+import { uploadFile } from "../tools/upload-file";
+import { createChannel } from "../tools/create-channel";
 
 /**
  * MCP Server State
@@ -524,6 +526,106 @@ export class SlackMcpServer extends McpAgent<Env, McpState, McpProps> {
           messageTs: args.message_ts,
           emoji: args.emoji,
           remove: args.remove,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+    );
+
+    // =========================================================================
+    // slack_upload_file - Upload a file to a conversation
+    // =========================================================================
+    this.server.tool(
+      "slack_upload_file",
+      "Upload a file to a Slack channel, DM, or thread. " +
+        "Give exactly one content source: content (text, e.g. CSV, code, logs, notes) " +
+        "or content_base64 (base64-encoded bytes for binary files). filename is required, " +
+        "and Slack picks the file type from its extension. Max 25 MB. " +
+        "Targets work the same as slack_reply: channel/DM IDs, a user ID (opens the DM), " +
+        "or a pasted Slack URL (a message URL puts the file in that thread). " +
+        "The optional message is posted with the file. Write it in Slack mrkdwn. " +
+        "IMPORTANT: This does NOT mark the channel as read.",
+      {
+        target: z
+          .string()
+          .describe("Channel ID (C...), User ID (U...), DM ID (D...), or Slack URL"),
+        content: z
+          .string()
+          .optional()
+          .describe("Text content to upload as a file"),
+        content_base64: z
+          .string()
+          .optional()
+          .describe("Base64-encoded file bytes"),
+        filename: z
+          .string()
+          .describe("File name with extension, e.g. report.csv"),
+        title: z.string().optional().describe("Title shown in Slack (defaults to filename)"),
+        message: z
+          .string()
+          .optional()
+          .describe("Message posted with the file, in Slack mrkdwn"),
+        thread_ts: z
+          .string()
+          .optional()
+          .describe("Parent message timestamp to upload into a thread"),
+      },
+      async (args) => {
+        const client = this.getClient();
+        const result = await uploadFile(client, {
+          target: args.target,
+          content: args.content,
+          contentBase64: args.content_base64,
+          filename: args.filename,
+          title: args.title,
+          message: args.message,
+          threadTs: args.thread_ts,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+    );
+
+    // =========================================================================
+    // slack_create_channel - Create a channel
+    // =========================================================================
+    this.server.tool(
+      "slack_create_channel",
+      "Create a new Slack channel. You join it as its creator. " +
+        "The name is converted to Slack's form: lowercase, spaces become hyphens, " +
+        "and other punctuation is dropped ('Q4 Planning' becomes q4-planning). " +
+        "The result shows the final name. " +
+        "Optionally set a description and topic, and invite people by user ID " +
+        "(use slack_find_conversation to look up IDs). If a later step fails, the " +
+        "channel still exists and the problem is listed in 'warnings'. " +
+        "Confirm the name and public/private choice with the user before creating: " +
+        "channels cannot be deleted through this server.",
+      {
+        name: z.string().describe("Channel name (max 80 chars after conversion)"),
+        is_private: z
+          .boolean()
+          .default(false)
+          .describe("Create a private channel (default: false)"),
+        description: z
+          .string()
+          .optional()
+          .describe("Channel description (what the channel is for)"),
+        topic: z.string().optional().describe("Channel topic"),
+        invite: z
+          .array(z.string())
+          .optional()
+          .describe("User IDs (U...) to invite"),
+      },
+      async (args) => {
+        const client = this.getClient();
+        const result = await createChannel(client, {
+          name: args.name,
+          isPrivate: args.is_private,
+          description: args.description,
+          topic: args.topic,
+          invite: args.invite,
         });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
